@@ -1,7 +1,7 @@
 # thermal_imaging_camera
 
 #### 介绍
-红外热成像相机基于ESP32
+红外热成像相机基于ESP32S3
 
 #### 软件架构
 软件架构说明
