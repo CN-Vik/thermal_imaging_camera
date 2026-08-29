@@ -20,9 +20,9 @@
 
 #include "esp_lcd_panel_st7789.h"
 
-#if CONFIG_EXAMPLE_LCD_TOUCH_CONTROLLER_STMPE610
-#include "esp_lcd_touch_stmpe610.h"
-#endif
+// #if CONFIG_EXAMPLE_LCD_TOUCH_CONTROLLER_STMPE610
+// #include "esp_lcd_touch_stmpe610.h"
+// #endif
 
 static const char *TAG = "example";
 
@@ -237,7 +237,7 @@ void app_main(void)
     esp_lcd_panel_handle_t panel_handle = NULL;
     esp_lcd_panel_dev_config_t panel_config = {
         .reset_gpio_num = EXAMPLE_PIN_NUM_LCD_RST,
-        .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_BGR,
+        .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
         .bits_per_pixel = 16,
     };
 
@@ -268,29 +268,29 @@ void app_main(void)
     // user can flush pre-defined pattern to the screen before we turn on the screen or backlight
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle, true));
 
-#if CONFIG_EXAMPLE_LCD_TOUCH_ENABLED
-    esp_lcd_panel_io_handle_t tp_io_handle = NULL;
-    esp_lcd_panel_io_spi_config_t tp_io_config = ESP_LCD_TOUCH_IO_SPI_STMPE610_CONFIG(EXAMPLE_PIN_NUM_TOUCH_CS);
-    // Attach the TOUCH to the SPI bus
-    ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_HOST, &tp_io_config, &tp_io_handle));
+// #if CONFIG_EXAMPLE_LCD_TOUCH_ENABLED
+//     esp_lcd_panel_io_handle_t tp_io_handle = NULL;
+//     esp_lcd_panel_io_spi_config_t tp_io_config = ESP_LCD_TOUCH_IO_SPI_STMPE610_CONFIG(EXAMPLE_PIN_NUM_TOUCH_CS);
+//     // Attach the TOUCH to the SPI bus
+//     ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_HOST, &tp_io_config, &tp_io_handle));
 
-    esp_lcd_touch_config_t tp_cfg = {
-        .x_max = EXAMPLE_LCD_H_RES,
-        .y_max = EXAMPLE_LCD_V_RES,
-        .rst_gpio_num = -1,
-        .int_gpio_num = -1,
-        .flags = {
-            .swap_xy = 0,
-            .mirror_x = 0,
-            .mirror_y = 0,
-        },
-    };
+//     esp_lcd_touch_config_t tp_cfg = {
+//         .x_max = EXAMPLE_LCD_H_RES,
+//         .y_max = EXAMPLE_LCD_V_RES,
+//         .rst_gpio_num = -1,
+//         .int_gpio_num = -1,
+//         .flags = {
+//             .swap_xy = 0,
+//             .mirror_x = 0,
+//             .mirror_y = 0,
+//         },
+//     };
 
-#if CONFIG_EXAMPLE_LCD_TOUCH_CONTROLLER_STMPE610
-    ESP_LOGI(TAG, "Initialize touch controller STMPE610");
-    ESP_ERROR_CHECK(esp_lcd_touch_new_spi_stmpe610(tp_io_handle, &tp_cfg, &tp));
-#endif // CONFIG_EXAMPLE_LCD_TOUCH_CONTROLLER_STMPE610
-#endif // CONFIG_EXAMPLE_LCD_TOUCH_ENABLED
+// #if CONFIG_EXAMPLE_LCD_TOUCH_CONTROLLER_STMPE610
+//     ESP_LOGI(TAG, "Initialize touch controller STMPE610");
+//     ESP_ERROR_CHECK(esp_lcd_touch_new_spi_stmpe610(tp_io_handle, &tp_cfg, &tp));
+// #endif // CONFIG_EXAMPLE_LCD_TOUCH_CONTROLLER_STMPE610
+// #endif // CONFIG_EXAMPLE_LCD_TOUCH_ENABLED
 
     ESP_LOGI(TAG, "Turn on LCD backlight");
     gpio_set_level(EXAMPLE_PIN_NUM_BK_LIGHT, EXAMPLE_LCD_BK_LIGHT_ON_LEVEL);

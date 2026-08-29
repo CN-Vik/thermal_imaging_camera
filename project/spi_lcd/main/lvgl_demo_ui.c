@@ -33,7 +33,7 @@ void example_lvgl_demo_ui(lv_disp_t *disp)
 
     lv_obj_set_style_bg_color(
         scr,
-        lv_color_make(0, 80, 60),
+        lv_color_make(128, 00, 00),
         LV_PART_MAIN
     );
 
