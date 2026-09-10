@@ -1,0 +1,31 @@
+
+function piResponse() {
+		piSetCookie('visitor_id682633', '814978309', 365);
+			piSetCookie('visitor_id682633-hash', '6a0287210be4ce4bfb926ff2a72f2d13c52677a2670cd6d8387c1d70f3b0e07920ae3a0dcd6704b0ea347198fecb9c164253f4a8', 365);
+		
+		if (document.location.protocol != "https:" || (document.location.protocol == "https:" && true)) {
+		var analytics_link = document.location.protocol + "//" + "go.melexis.com/analytics?";
+		pi.tracker.visitor_id='814978309';
+
+				pi.tracker.visitor_id_sign='6a0287210be4ce4bfb926ff2a72f2d13c52677a2670cd6d8387c1d70f3b0e07920ae3a0dcd6704b0ea347198fecb9c164253f4a8';
+		
+				pi.tracker.campaign_id='28823';
+		
+		var variables = 'conly=true';
+		for (property in pi.tracker) {
+					variables += "&" + property + "=" + encodeURIComponent(pi.tracker[property]);
+				}
+		var headID = document.getElementsByTagName("head")[0];
+		piScriptObj[piScriptNum] = document.createElement('script');
+		piScriptObj[piScriptNum].type = 'text/javascript';
+		piScriptObj[piScriptNum].src = analytics_link + variables;
+		headID.appendChild(piScriptObj[piScriptNum]);
+		piScriptObj[piScriptNum].onload = function() { return; }
+	}
+	}
+piResponse();
+
+
+
+
+!function(){"use strict";function i(e,t){e.getVisitorKey()?t(e):setTimeout(function(){i(e,t)},500)}function e(i){"playing"===i.state()||i.params.autoPlay?a(i):i.bind("play",function(){return a(i),this.unbind}),i.bind("conversion",function(e,t){d(e,t,i)})}function t(i){if(u)return i();for(var e=document.getElementsByTagName("script"),t=/embed_shepherd.*\.js/,o=0;o<e.length;o++)if(t.test(e[o].src))return u=!0,i();n("//fast.wistia.com/static/embed_shepherd-v1.js",function(){u=!0,i()})}function n(i,e){var t=document.head||document.getElementsByTagName("head")[0]||document.documentElement,n=document.createElement("script");n.async="async",n.src=i,n.onload=n.onreadystatechange=function(i,o){(o||!n.readyState||/loaded|complete/.test(n.readyState))&&(n.onload=n.onreadystatechange=null,t&&n.parentNode&&t.removeChild(n),n=void 0,o||e())},t.insertBefore(n,t.firstChild)}function o(i){var e={account_id:piAId,campaign_id:piCId,provider:"wistia"};"undefined"!=typeof pi?e.visitor_id=pi.tracker.visitor_id:"undefined"!=typeof pardot&&(e.visitor_id=pardot.tracker.visitor_id),""===e.visitor_id&&(e.visitor_id=piGetCookie("visitor_id"+(piAId-1e3)));var t=s(r(e,i));n("//"+c+"/video/analytics?"+t,function(){})}function a(i){o({video_name:i.name(),wistia_visitor_key:i.getVisitorKey(),wistia_event_key:i.getEventKey(),hashed_id:i.hashedId(),type:"play"})}function d(i,e,t){o({video_name:t.name(),wistia_visitor_key:t.getVisitorKey(),wistia_event_key:t.getEventKey(),hashed_id:t.hashedId(),type:"conversion",email:e})}function r(){for(var i,e=arguments[0],t=1;t<arguments.length;t++)for(i in arguments[t])e[i]=arguments[t][i];return e}function s(i){var e="";for(var t in i)i.hasOwnProperty(t)&&(e+=encodeURIComponent(t)+"="+encodeURIComponent(i[t])+"&");return e.substring(0,e.length-1)}if("undefined"!=typeof piAId||"undefined"!=typeof piCId){var c="pi.pardot.com";"string"!=typeof piTUrl||-1===piTUrl.indexOf("localhost")&&-1===piTUrl.indexOf("app.dev.pardot")||(c=piTUrl);var u=!0;"undefined"!=typeof wistiaPlaylist?(wistiaPlaylist.ready(function(){i(wistiaPlaylist.currentVideo(),e)}),wistiaPlaylist.bind("afterembed",function(){i(wistiaPlaylist.currentVideo(),e)})):t(function(){void 0!==window.wistiaEmbeds&&window.wistiaEmbeds.onFind(function(t){t.ready(function(){i(t,e)})})})}}();
