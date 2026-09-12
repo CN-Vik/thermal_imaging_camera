@@ -1,99 +1,41 @@
-/*
- * SPDX-FileCopyrightText: 2021-2022 Espressif Systems (Shanghai) CO LTD
- *
- * SPDX-License-Identifier: CC0-1.0
- */
-
-// This demo UI is adapted from LVGL official example: https://docs.lvgl.io/master/widgets/extra/meter.html#simple-meter
-
 #include "lvgl.h"
+#include "ir_mlx90640_app.h"
 
-static lv_obj_t *meter;
-static lv_obj_t * btn;
-static lv_disp_rot_t rotation = LV_DISP_ROT_NONE;
+// 去掉 static，让采集任务可以访问并刷新
+lv_obj_t *img_thermal = NULL;
+lv_obj_t *label_info = NULL;
 
-static void set_value(void *indic, int32_t v)
-{
-    lv_meter_set_indicator_end_value(meter, indic, v);
-}
+// 图像描述符：绑定原始 32x24 数组
+static lv_img_dsc_t raw_img_dsc = {
+    .header.always_zero = 0,
+    .header.w = MLX_W,
+    .header.h = MLX_H,
+    .data_size = MLX_W * MLX_H * sizeof(uint16_t),
+    .header.cf = LV_IMG_CF_TRUE_COLOR,
+    .data = (const uint8_t *)s_raw_rgb565,
+};
 
-static void btn_cb(lv_event_t * e)
-{
-    lv_disp_t *disp = lv_event_get_user_data(e);
-    rotation++;
-    if (rotation > LV_DISP_ROT_270) {
-        rotation = LV_DISP_ROT_NONE;
-    }
-    lv_disp_set_rotation(disp, rotation);
-}
-
-void example_lvgl_demo_ui(lv_disp_t *disp)
+void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
 {
     lv_obj_t *scr = lv_disp_get_scr_act(disp);
 
-    lv_obj_set_style_bg_color(
-        scr,
-        lv_color_make(128, 00, 00),
-        LV_PART_MAIN
-    );
+    // 1. 设置黑色纯净背景
+    lv_obj_set_style_bg_color(scr, lv_color_black(), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, LV_PART_MAIN);
 
-    lv_obj_set_style_bg_opa(
-        scr,
-        LV_OPA_COVER,
-        LV_PART_MAIN
-    );
-    
-    meter = lv_meter_create(scr);
-    lv_obj_center(meter);
-    lv_obj_set_size(meter, 200, 200);
+    // 2. 创建热像图控件
+    img_thermal = lv_img_create(scr);
+    lv_img_set_src(img_thermal, &raw_img_dsc);
 
-    /*Add a scale first*/
-    lv_meter_scale_t *scale = lv_meter_add_scale(meter);
-    lv_meter_set_scale_ticks(meter, scale, 41, 2, 10, lv_palette_main(LV_PALETTE_GREY));
-    lv_meter_set_scale_major_ticks(meter, scale, 8, 4, 15, lv_color_black(), 10);
+    // 屏幕是 240x280，热图像素 32x24 放大 6 倍即 192x144，比例正好
+    // LVGL v8 zoom: 256 为 1.0 倍，256 * 6 = 1536
+    lv_img_set_zoom(img_thermal, 1536);
+    lv_obj_align(img_thermal, LV_ALIGN_CENTER, 0, -25);
 
-    lv_meter_indicator_t *indic;
-
-    /*Add a blue arc to the start*/
-    indic = lv_meter_add_arc(meter, scale, 3, lv_palette_main(LV_PALETTE_BLUE), 0);
-    lv_meter_set_indicator_start_value(meter, indic, 0);
-    lv_meter_set_indicator_end_value(meter, indic, 20);
-
-    /*Make the tick lines blue at the start of the scale*/
-    indic = lv_meter_add_scale_lines(meter, scale, lv_palette_main(LV_PALETTE_BLUE), lv_palette_main(LV_PALETTE_BLUE), false, 0);
-    lv_meter_set_indicator_start_value(meter, indic, 0);
-    lv_meter_set_indicator_end_value(meter, indic, 20);
-
-    /*Add a red arc to the end*/
-    indic = lv_meter_add_arc(meter, scale, 3, lv_palette_main(LV_PALETTE_RED), 0);
-    lv_meter_set_indicator_start_value(meter, indic, 80);
-    lv_meter_set_indicator_end_value(meter, indic, 100);
-
-    /*Make the tick lines red at the end of the scale*/
-    indic = lv_meter_add_scale_lines(meter, scale, lv_palette_main(LV_PALETTE_RED), lv_palette_main(LV_PALETTE_RED), false, 0);
-    lv_meter_set_indicator_start_value(meter, indic, 80);
-    lv_meter_set_indicator_end_value(meter, indic, 100);
-
-    /*Add a needle line indicator*/
-    indic = lv_meter_add_needle_line(meter, scale, 4, lv_palette_main(LV_PALETTE_GREY), -10);
-
-    btn = lv_btn_create(scr);
-    lv_obj_t * lbl = lv_label_create(btn);
-    lv_label_set_text_static(lbl, LV_SYMBOL_REFRESH" ROTATE");
-    lv_obj_align(btn, LV_ALIGN_BOTTOM_LEFT, 30, -30);
-    /*Button event*/
-    lv_obj_add_event_cb(btn, btn_cb, LV_EVENT_CLICKED, disp);
-
-    /*Create an animation to set the value*/
-    lv_anim_t a;
-    lv_anim_init(&a);
-    lv_anim_set_exec_cb(&a, set_value);
-    lv_anim_set_var(&a, indic);
-    lv_anim_set_values(&a, 0, 100);
-    lv_anim_set_time(&a, 2000);
-    lv_anim_set_repeat_delay(&a, 100);
-    lv_anim_set_playback_time(&a, 500);
-    lv_anim_set_playback_delay(&a, 100);
-    lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
-    lv_anim_start(&a);
+    // 3. 创建温度数据显示标签
+    label_info = lv_label_create(scr);
+    lv_obj_set_style_text_color(label_info, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_text_align(label_info, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(label_info, LV_ALIGN_BOTTOM_MID, 0, -15);
+    lv_label_set_text(label_info, "MLX90640 Initializing...");
 }
