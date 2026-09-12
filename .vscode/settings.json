@@ -1,3 +1,4 @@
 {
-    "idf.currentSetup": "C:\\esp\\v5.3.5\\esp-idf"
+    "idf.currentSetup": "C:\\esp\\v5.3.5\\esp-idf",
+    "cmake.sourceDirectory": "C:/Users/ufo28/Desktop/thermal_imaging_camera/project/spi_lcd"
 }

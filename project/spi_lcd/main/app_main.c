@@ -64,6 +64,10 @@ static SemaphoreHandle_t lvgl_mux = NULL;
 esp_lcd_touch_handle_t tp = NULL;
 #endif
 
+extern TaskHandle_t ir_task_Handle;
+
+void ir_camera_task_main(void);
+
 extern void example_lvgl_demo_ui(lv_disp_t *disp);
 
 static bool example_notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata, void *user_ctx)
@@ -177,7 +181,13 @@ void example_lvgl_unlock(void)
 
 static void example_lvgl_port_task(void *arg)
 {
-    ESP_LOGI(TAG, "Starting LVGL task");
+    ESP_LOGI(TAG, "Starting LVGL task,LVGL_Version:%d.%d.%d\n", 
+        LVGL_VERSION_MAJOR, 
+        LVGL_VERSION_MINOR, 
+        LVGL_VERSION_PATCH
+    );
+
+
     uint32_t task_delay_ms = EXAMPLE_LVGL_TASK_MAX_DELAY_MS;
     while (1) {
         // Lock the mutex due to the LVGL APIs are not thread-safe
@@ -349,4 +359,21 @@ void app_main(void)
         // Release the mutex
         example_lvgl_unlock();
     }
+
+    /*创建热成像图像数据采集任务*/
+    BaseType_t xReturned = xTaskCreate(
+        ir_camera_task_main,       /* Function that implements the task. */
+        "ir_camera_task_main",          /* Text name for the task. */
+        (8*1024),      /* Stack size in words, not bytes. */
+        NULL,    /* Parameter passed into the task. */
+        5,/* Priority at which the task is created. */
+        &ir_task_Handle 
+    ); /* Used to pass out the created task's handle. */
+
+    if (xReturned!=pdPASS )
+    {
+        ESP_LOGE(TAG, "ir_camera_task_main creat failed!");
+    }
+    
+
 }
