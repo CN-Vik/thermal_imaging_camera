@@ -381,7 +381,7 @@ void app_main(void)
     BaseType_t xReturned = xTaskCreatePinnedToCore(
         ir_camera_task_main,   /* Function that implements the task. */
         "ir_camera_task_main", /* Text name for the task. */
-        (8 * 1024),            /* Stack size in words, not bytes. */
+        (6 * 1024),            /* Stack size in words, not bytes. */
         NULL,                  /* Parameter passed into the task. */
         5,                     /* Priority at which the task is created. */
         &ir_task_Handle,
