@@ -7,11 +7,11 @@
 #include "MLX90640_I2C_Driver.h"
 #include "MLX90640_API.h"
 #include "ir_mlx90640_app.h"
+#include "esp_timer.h"
 
 static const char *TAG = "mlx_app";
 
-#define MLX90640_ADDR 0x33
-#define TA_SHIFT 8
+
 
 TaskHandle_t ir_task_Handle = NULL;
 
@@ -21,6 +21,8 @@ static float emissivity = 0.95f;
 // 全局图像显存
 uint16_t s_raw_rgb565[MLX_W * MLX_H];
 
+// 映射表
+const float rate_hz_table[] = {0.5f, 1.0f, 2.0f, 4.0f, 8.0f, 16.0f, 32.0f, 64.0f};
 
 
 /**
@@ -93,7 +95,7 @@ void ir_camera_task_main(void *pvParameters)
     ESP_LOGI(TAG, "IR camera task running on core %d", xPortGetCoreID());
 
     MLX90640_I2CInit();
-    MLX90640_SetRefreshRate(MLX90640_ADDR, 0x04); // 8Hz
+    MLX90640_SetRefreshRate(MLX90640_ADDR, RefreshRate); // 8Hz
     MLX90640_SetChessMode(MLX90640_ADDR);
 
     uint16_t *ir_frame_data = (uint16_t*)calloc(834,sizeof(uint16_t));
@@ -129,12 +131,17 @@ void ir_camera_task_main(void *pvParameters)
 
     char text_buf[64]; // 用于标准 snprintf 格式化
 
+    uint32_t frame_count = 0;
+    float real_fps = 0.0f;
+    int64_t last_time_us = 0;
+
     while (1) 
     {
         // 1. 读取单帧数据
         if (MLX90640_GetFrameData(MLX90640_ADDR, ir_frame_data) >= 0) {
             float ta = MLX90640_GetTa(ir_frame_data, mlx90640_v);
             MLX90640_CalculateTo(ir_frame_data, mlx90640_v, emissivity, ta - TA_SHIFT, ir_temp_data);
+            frame_count++;
         }
 
         // 2. 统计极值（彻底过滤掉 1.0°C 以下的未更新异常点）
@@ -164,8 +171,30 @@ void ir_camera_task_main(void *pvParameters)
             }
         }
 
+        int rate_code = MLX90640_GetRefreshRate(MLX90640_ADDR);
+
+        float set_hz = (rate_code >= 0 && rate_code <= 7) ? rate_hz_table[rate_code] : 0.0f;
+
+        // 4. 计算实际帧率 (每经过 1 秒计算一次平均 FPS)
+        int64_t now_us = esp_timer_get_time();
+        int64_t diff_us = now_us - last_time_us;
+        if (diff_us >= 1000000) { // 满 1 秒 (1000000 微秒)
+            real_fps = (float)frame_count * 1000000.0f / (float)diff_us;
+            frame_count = 0;
+            last_time_us = now_us;
+        }
+
         // 4. 标准 snprintf 解决浮点数打印为 f 的问题
-        snprintf(text_buf, sizeof(text_buf), "Max:%.1f C  Min:%.1f C\nCenter:%.1f C", max_t, min_t, mid_t);
+        snprintf(
+            text_buf,
+            sizeof(text_buf), 
+            "Max:%.1fC\nMin:%.1fC\nCenter:%.1fC,\nset_FPS:%.1f,FPS:%.1f",
+            max_t, 
+            min_t, 
+            mid_t,
+            set_hz,
+            real_fps
+        );
 
         if (example_lvgl_lock(10)) {
             if (img_thermal) {
@@ -177,7 +206,7 @@ void ir_camera_task_main(void *pvParameters)
             example_lvgl_unlock();
         }
 
-        vTaskDelay(pdMS_TO_TICKS(15));
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
 
     if ( mlx90640_v && ir_frame_data && eerom_ir_data && ir_temp_data)
