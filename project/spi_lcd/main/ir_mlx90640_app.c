@@ -23,8 +23,41 @@ uint16_t s_raw_rgb565[MLX_W * MLX_H];
 
 
 
-// 最简冷暖色映射：低温纯蓝 -> 中温绿 -> 高温纯红
-static inline uint16_t simple_temp_to_rgb565(float val, float min_t, float max_t) 
+/**
+ * @brief 白热模式（White-Hot）：低温纯黑 -> 高温纯白（自动适配 LVGL 字节序）
+ */
+static inline uint16_t temp_to_white_hot_rgb565(float val, float min_t, float max_t) 
+{
+    if (max_t <= min_t) max_t = min_t + 0.1f;
+    float norm = (val - min_t) / (max_t - min_t);
+    if (norm < 0.0f) norm = 0.0f;
+    if (norm > 1.0f) norm = 1.0f;
+
+    uint8_t gray = (uint8_t)(norm * 255.0f);
+
+    // 使用 LVGL 官方宏构建颜色，自动处理 16 位大端/小端字节交换
+    return lv_color_make(gray, gray, gray).full;
+}
+
+/**
+ * @brief 黑热模式（Black-Hot）：高温纯黑 -> 低温纯白（自动适配 LVGL 字节序）
+ */
+static inline uint16_t temp_to_black_hot_rgb565(float val, float min_t, float max_t) 
+{
+    if (max_t <= min_t) max_t = min_t + 0.1f;
+    float norm = (val - min_t) / (max_t - min_t);
+    if (norm < 0.0f) norm = 0.0f;
+    if (norm > 1.0f) norm = 1.0f;
+
+    uint8_t gray = (uint8_t)((1.0f - norm) * 255.0f);
+
+    return lv_color_make(gray, gray, gray).full;
+}
+
+/**
+ * @brief 经典彩虹伪彩色：纯蓝 -> 青 -> 绿 -> 黄 -> 纯红
+ */
+static inline uint16_t temp_to_rainbow_rgb565(float val, float min_t, float max_t) 
 {
     if (max_t <= min_t) max_t = min_t + 0.1f;
     float norm = (val - min_t) / (max_t - min_t);
@@ -32,15 +65,26 @@ static inline uint16_t simple_temp_to_rgb565(float val, float min_t, float max_t
     if (norm > 1.0f) norm = 1.0f;
 
     uint8_t r = 0, g = 0, b = 0;
-    if (norm < 0.5f) {
-        b = (uint8_t)((1.0f - norm * 2.0f) * 255);
-        g = (uint8_t)(norm * 2.0f * 255);
-    } else {
-        g = (uint8_t)((1.0f - (norm - 0.5f) * 2.0f) * 255);
-        r = (uint8_t)((norm - 0.5f) * 2.0f * 255);
+    if (norm < 0.25f) { // 蓝 -> 青
+        r = 0;
+        g = (uint8_t)(norm * 4.0f * 255);
+        b = 255;
+    } else if (norm < 0.5f) { // 青 -> 绿
+        r = 0;
+        g = 255;
+        b = (uint8_t)((1.0f - (norm - 0.25f) * 4.0f) * 255);
+    } else if (norm < 0.75f) { // 绿 -> 黄
+        r = (uint8_t)((norm - 0.5f) * 4.0f * 255);
+        g = 255;
+        b = 0;
+    } else { // 黄 -> 红
+        r = 255;
+        g = (uint8_t)((1.0f - (norm - 0.75f) * 4.0f) * 255);
+        b = 0;
     }
 
-    return (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+    // 核心：使用 lv_color_make 保证字节序 100% 正确
+    return lv_color_make(r, g, b).full;
 }
 
 void ir_camera_task_main(void *pvParameters)
@@ -112,7 +156,11 @@ void ir_camera_task_main(void *pvParameters)
         // 3. 颜色映射：只有 > 1.0°C 的像素才更新颜色，其余保留上一帧颜色（双子页无缝缝合）
         for (int i = 0; i < 768; i++) {
             if (ir_temp_data[i] > 1.0f) {
-                s_raw_rgb565[i] = simple_temp_to_rgb565(ir_temp_data[i], min_t, max_t);
+                s_raw_rgb565[i] = temp_to_rainbow_rgb565(ir_temp_data[i], min_t, max_t);
+                // s_raw_rgb565[i] = temp_to_black_hot_rgb565(ir_temp_data[i], min_t, max_t);
+                // s_raw_rgb565[i] = temp_to_white_hot_rgb565(ir_temp_data[i], min_t, max_t);
+
+                // s_raw_rgb565[i] = (ir_temp_data[i]);
             }
         }
 

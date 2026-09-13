@@ -29,8 +29,10 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
 
     // 屏幕是 240x280，热图像素 32x24 放大 6 倍即 192x144，比例正好
     // LVGL v8 zoom: 256 为 1.0 倍，256 * 6 = 1536
-    lv_img_set_zoom(img_thermal, 1536);
+    lv_img_set_zoom(img_thermal, (256*6));
     lv_obj_align(img_thermal, LV_ALIGN_CENTER, 0, -25);
+    // 关闭放大时的抗锯齿，呈现硬朗干净的纯像素块，杜绝边缘模糊与杂色
+    lv_img_set_antialias(img_thermal, false);
 
     // 3. 创建温度数据显示标签
     label_info = lv_label_create(scr);
