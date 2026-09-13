@@ -37,5 +37,5 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
     lv_obj_set_style_text_color(label_info, lv_color_white(), LV_PART_MAIN);
     lv_obj_set_style_text_align(label_info, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(label_info, LV_ALIGN_BOTTOM_MID, 0, -15);
-    lv_label_set_text(label_info, "MLX90640 Initializing...");
+    // lv_label_set_text(label_info, "ir_temp:");
 }

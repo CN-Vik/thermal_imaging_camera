@@ -110,7 +110,16 @@ int MLX90640_TriggerMeasurement(uint8_t slaveAddr)
     
     return MLX90640_NO_ERROR;    
 }
-    
+
+/**
+ * @brief  从 MLX90640 读取一帧完整的原始红外数据
+ * @param  slaveAddr  I2C 从机地址（7 位地址，通常为 0x33）
+ * @param  frameData  输出：存储原始数据的缓冲区，长度至少为 834 个 uint16_t
+ * @retval 0   读取成功
+ * @retval -1  读取失败（I2C 通信错误）
+ * @note   读取的数据包含 768 个像素数据 + 辅助数据（PTAT、VDD 等），
+ *         后续需调用 MLX90640_CalculateTo() 或 MLX90640_GetImage() 转换为温度。
+ */
 int MLX90640_GetFrameData(uint8_t slaveAddr, uint16_t *frameData)
 {
     uint16_t dataReady = 0;
@@ -390,7 +399,16 @@ int MLX90640_GetCurMode(uint8_t slaveAddr)
 }
 
 //------------------------------------------------------------------------------
-
+/**
+ * @brief  计算 MLX90640 各像素对应的目标温度（物体温度）
+ * @param  frameData  输入：一帧原始红外数据指针，通常包含 834 个 uint16_t 数据
+ * @param  params     输入：MLX90640 校准参数指针，由 MLX90640_GetParams() 获取
+ * @param  emissivity 输入：目标物体发射率，范围 0~1，常用 0.95
+ * @param  tr         输入：反射温度，单位 ℃，一般取环境温度
+ * @param  result     输出：768 个像素的目标温度数组，单位 ℃，长度至少为 768
+ * @retval 无
+ * @note   调用前需先获取一帧数据并解析校准参数；result 需由调用者分配足够空间。
+ */
 void MLX90640_CalculateTo(uint16_t *frameData, const paramsMLX90640 *params, float emissivity, float tr, float *result)
 {
     float vdd;
@@ -524,6 +542,16 @@ void MLX90640_CalculateTo(uint16_t *frameData, const paramsMLX90640 *params, flo
 
 //------------------------------------------------------------------------------
 
+/**
+ * @brief  获取 MLX90640 的整幅热图像（每个像素的目标温度）
+ * @param  frameData  输入：一帧原始红外数据，通常为 834 个 uint16_t
+ * @param  params     输入：MLX90640 校准参数，由 MLX90640_ExtractParameters() 得到
+ * @param  result     输出：768 个像素的温度值，单位 ℃，按 32×24 排列
+ * @retval 无
+ * @note   该函数通常用于把原始数据转换成可视化热图；
+ *         内部会计算 VDD、Ta，并对每个像素做偏移、增益、发射率等补偿。
+ *         若需要自定义发射率和反射温度，应改用 MLX90640_CalculateTo()。
+ */
 void MLX90640_GetImage(uint16_t *frameData, const paramsMLX90640 *params, float *result)
 {
     float vdd;
@@ -612,7 +640,13 @@ void MLX90640_GetImage(uint16_t *frameData, const paramsMLX90640 *params, float 
 }
 
 //------------------------------------------------------------------------------
-
+/**
+ * @brief  计算 MLX90640 的供电电压 VDD
+ * @param  frameData  输入：一帧原始红外数据，长度通常为 834 个 uint16_t
+ * @param  params     输入：MLX90640 校准参数
+ * @retval 供电电压，单位 V
+ * @note   从 frameData[810] 读取 VDD 原始值，结合校准参数 kVdd、vdd25 和分辨率计算。
+ */
 float MLX90640_GetVdd(uint16_t *frameData, const paramsMLX90640 *params)
 {
     float vdd;
@@ -628,7 +662,14 @@ float MLX90640_GetVdd(uint16_t *frameData, const paramsMLX90640 *params)
 }
 
 //------------------------------------------------------------------------------
-
+/**
+ * @brief  计算 MLX90640 的传感器环境温度 Ta
+ * @param  frameData  输入：一帧原始红外数据，长度通常为 834 个 uint16_t
+ * @param  params     输入：MLX90640 校准参数
+ * @retval 环境温度 Ta，单位 ℃
+ * @note   内部会先调用 MLX90640_GetVdd() 获取供电电压，
+ *         再读取 PTAT 和 PTAT_ART 原始值，结合校准参数计算 Ta。
+ */
 float MLX90640_GetTa(uint16_t *frameData, const paramsMLX90640 *params)
 {
     int16_t ptat;

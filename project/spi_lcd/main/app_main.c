@@ -267,13 +267,17 @@ void app_main(void)
     ESP_ERROR_CHECK(
         esp_lcd_panel_invert_color(
             panel_handle,
-            true));
+            true
+        )
+    );
 
     ESP_ERROR_CHECK(
         esp_lcd_panel_set_gap(
             panel_handle,
             0,
-            20));
+            20
+        )
+    );
 
     ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel_handle, false, false));
 
@@ -332,7 +336,8 @@ void app_main(void)
     // Tick interface for LVGL (using esp_timer to generate 2ms periodic event)
     const esp_timer_create_args_t lvgl_tick_timer_args = {
         .callback = &example_increase_lvgl_tick,
-        .name = "lvgl_tick"};
+        .name = "lvgl_tick"
+    };
     esp_timer_handle_t lvgl_tick_timer = NULL;
     ESP_ERROR_CHECK(esp_timer_create(&lvgl_tick_timer_args, &lvgl_tick_timer));
     ESP_ERROR_CHECK(esp_timer_start_periodic(lvgl_tick_timer, EXAMPLE_LVGL_TICK_PERIOD_MS * 1000));
@@ -379,7 +384,8 @@ void app_main(void)
         NULL,                  /* Parameter passed into the task. */
         5,                     /* Priority at which the task is created. */
         &ir_task_Handle,
-        1); /* Used to pass out the created task's handle. */
+        1
+    ); /* Used to pass out the created task's handle. */
 
     if (xReturned != pdPASS)
     {
