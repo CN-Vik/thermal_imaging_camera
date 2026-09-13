@@ -33,7 +33,7 @@ static const char *TAG = "thermal imaging_eg";
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //////////////////// Please update the following configuration according to your LCD spec //////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-#define EXAMPLE_LCD_PIXEL_CLOCK_HZ (20 * 1000 * 1000)
+#define EXAMPLE_LCD_PIXEL_CLOCK_HZ (40 * 1000 * 1000)
 #define EXAMPLE_LCD_BK_LIGHT_ON_LEVEL 1
 #define EXAMPLE_LCD_BK_LIGHT_OFF_LEVEL !EXAMPLE_LCD_BK_LIGHT_ON_LEVEL
 #define EXAMPLE_PIN_NUM_SCLK 18
@@ -47,6 +47,7 @@ static const char *TAG = "thermal imaging_eg";
 
 #define EXAMPLE_LCD_H_RES 240
 #define EXAMPLE_LCD_V_RES 280
+#define LCD_BUF_LINES 45 // 增大单次切片行数
 
 // Bit number used to represent command and parameter
 #define EXAMPLE_LCD_CMD_BITS 8
@@ -316,12 +317,12 @@ void app_main(void)
     lv_init();
     // alloc draw buffers used by LVGL
     // it's recommended to choose the size of the draw buffer(s) to be at least 1/10 screen sized
-    lv_color_t *buf1 = heap_caps_malloc(EXAMPLE_LCD_H_RES * 20 * sizeof(lv_color_t), MALLOC_CAP_DMA);
+    lv_color_t *buf1 = heap_caps_malloc(EXAMPLE_LCD_H_RES * LCD_BUF_LINES * sizeof(lv_color_t), MALLOC_CAP_DMA);
     assert(buf1);
-    lv_color_t *buf2 = heap_caps_malloc(EXAMPLE_LCD_H_RES * 20 * sizeof(lv_color_t), MALLOC_CAP_DMA);
+    lv_color_t *buf2 = heap_caps_malloc(EXAMPLE_LCD_H_RES * LCD_BUF_LINES * sizeof(lv_color_t), MALLOC_CAP_DMA);
     assert(buf2);
     // initialize LVGL draw buffers
-    lv_disp_draw_buf_init(&disp_buf, buf1, buf2, EXAMPLE_LCD_H_RES * 20);
+    lv_disp_draw_buf_init(&disp_buf, buf1, buf2, EXAMPLE_LCD_H_RES * LCD_BUF_LINES);
 
     ESP_LOGI(TAG, "Register display driver to LVGL");
     lv_disp_drv_init(&disp_drv);

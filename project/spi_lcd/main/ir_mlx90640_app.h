@@ -30,7 +30,7 @@ extern "C" {
 #define FPS8HZ                  0x04
 #define FPS16HZ                 0x05
 #define FPS32HZ                 0x06
-#define RefreshRate             FPS16HZ 
+#define RefreshRate             FPS32HZ 
 
 // 导出高分辨率插值图像显存及 LVGL 图像描述符
 extern uint16_t s_display_rgb565[MLX_INTERP_PIXELS];

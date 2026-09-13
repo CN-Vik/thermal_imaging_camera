@@ -256,7 +256,7 @@ void ir_camera_task_main(void *pvParameters)
                      cur_max, cur_min, center_t, real_fps, set_hz);
 
             // 8. 刷新 LVGL 画面
-            if (example_lvgl_lock(10)) {
+            if (example_lvgl_lock(100)) {
                 if (img_thermal) {
                     lv_obj_invalidate(img_thermal);
                 }
@@ -267,6 +267,7 @@ void ir_camera_task_main(void *pvParameters)
             }
         }
 
-        vTaskDelay(pdMS_TO_TICKS(1));
+        // vTaskDelay(pdMS_TO_TICKS(1));
+        taskYIELD();
     }
 }
