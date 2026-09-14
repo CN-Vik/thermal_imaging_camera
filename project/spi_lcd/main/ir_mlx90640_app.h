@@ -16,7 +16,7 @@ extern "C" {
 #define MLX_W                   MLX_RAW_W
 #define MLX_H                   MLX_RAW_H
 
-// 严格锁定 4:3 比例 (横向纵向均放大 7.5 倍，几何 1:1 杜绝变形拉伸)
+// 严格 4:3 比例 (240x180，横纵均等比放大 7.5 倍，几何 1:1 绝无拉伸变形)
 #define MLX_INTERP_W            240
 #define MLX_INTERP_H            180
 #define MLX_INTERP_PIXELS       (MLX_INTERP_W * MLX_INTERP_H)
@@ -30,10 +30,10 @@ extern "C" {
 #define FPS16HZ                 0x05
 #define FPS32HZ                 0x06
 
-// 推荐 16Hz：兼顾信噪比与极速刷新响应
-#define RefreshRate             FPS16HZ 
+// 开源项目公认黄金档位：信噪比最佳，底噪极低
+#define RefreshRate             FPS8HZ 
 
-// 导出图像描述符与 UI 控件句柄
+// 导出 UI 句柄
 extern lv_img_dsc_t s_thermal_img_dsc;
 extern lv_obj_t *img_thermal;
 extern lv_obj_t *label_title;

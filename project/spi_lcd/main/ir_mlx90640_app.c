@@ -88,6 +88,33 @@ static void init_ironbow_lut(void)
     }
 }
 
+/**
+ * @brief 开源标杆项目经典滤波核：
+ * 中心高达 10.0，四周微扩散（1.0 和 0.5）。
+ * 抹平传感器白噪声和马赛克棱角，同时保留指缝温差陡度，绝不长蹼！
+ */
+static void spatial_filter_proven(const float *src, float *dst, int w, int h)
+{
+    for (int r = 0; r < h; r++) {
+        int r_prev = (r > 0) ? (r - 1) : 0;
+        int r_next = (r < h - 1) ? (r + 1) : (h - 1);
+
+        for (int c = 0; c < w; c++) {
+            int c_prev = (c > 0) ? (c - 1) : 0;
+            int c_next = (c < w - 1) ? (c + 1) : (c - 1);
+
+            float sum = src[r * w + c] * 10.0f
+                      + (src[r_prev * w + c] + src[r_next * w + c] + src[r * w + c_prev] + src[r * w + c_next]) * 1.0f
+                      + (src[r_prev * w + c_prev] + src[r_prev * w + c_next] + src[r_next * w + c_prev] + src[r_next * w + c_next]) * 0.5f;
+
+            dst[r * w + c] = sum * (1.0f / 16.0f);
+        }
+    }
+}
+
+/**
+ * @brief 定点数双线性插值 (32x24 -> 240x180 等比不形变)
+ */
 static void bilinear_scale_to_rgb565(const uint8_t *src, int src_w, int src_h,
                                      uint16_t *dst, int dst_w, int dst_h,
                                      const uint16_t *lut)
@@ -124,9 +151,6 @@ static void bilinear_scale_to_rgb565(const uint8_t *src, int src_w, int src_h,
     }
 }
 
-/**
- * @brief 绘制专业空心菱形（Diamond ◆）追踪点，中心保留清晰单点
- */
 static inline void draw_diamond_marker(uint16_t *buf, int cx, int cy, int w, int h, int r, uint16_t color)
 {
     for (int i = 0; i <= r; i++) {
@@ -159,9 +183,10 @@ void ir_camera_task_main(void *pvParameters)
 
     float *raw_full_matrix     = (float *)calloc(MLX_RAW_PIXELS, sizeof(float));
     float *filtered_temp       = (float *)calloc(MLX_RAW_PIXELS, sizeof(float));
+    float *spatial_temp        = (float *)calloc(MLX_RAW_PIXELS, sizeof(float));
     uint8_t *norm_matrix       = (uint8_t *)calloc(MLX_RAW_PIXELS, sizeof(uint8_t));
 
-    if (!ir_frame_data || !eerom_ir_data || !ir_temp_data || !mlx_params || !raw_full_matrix || !filtered_temp || !norm_matrix) {
+    if (!ir_frame_data || !eerom_ir_data || !ir_temp_data || !mlx_params || !raw_full_matrix || !filtered_temp || !spatial_temp || !norm_matrix) {
         ESP_LOGE(TAG, "Critical: calloc failed, Out of memory!");
         vTaskDelete(NULL);
     }
@@ -193,7 +218,7 @@ void ir_camera_task_main(void *pvParameters)
             MLX90640_CalculateTo(ir_frame_data, mlx_params, emissivity, ta - TA_SHIFT, ir_temp_data);
             frame_count++;
 
-            // 1. 刷新当前子页真实测得的温度
+            // 1. 刷新当前子页真实数据
             for (int i = 0; i < MLX_RAW_PIXELS; i++) {
                 int r = i / MLX_RAW_W;
                 int c = i % MLX_RAW_W;
@@ -205,8 +230,7 @@ void ir_camera_task_main(void *pvParameters)
                 }
             }
 
-            // 2. 运动自适应棋盘解交织（彻底铲除移动边缘的拉链马赛克）
-            // 对于未更新的子页像素，提取其四周 4 个正交邻居（这 4 个邻居必然属于当前子页的最新测量值）
+            // 2. 运动自适应邻域补齐（彻底消除甩动镜头时的黑白交错拉链马赛克）
             for (int r = 0; r < MLX_RAW_H; r++) {
                 for (int c = 0; c < MLX_RAW_W; c++) {
                     if (((r + c) & 1) != subpage) {
@@ -218,37 +242,37 @@ void ir_camera_task_main(void *pvParameters)
                         if (c > 0)             { sum += raw_full_matrix[r * MLX_RAW_W + (c - 1)]; count++; }
                         if (c < MLX_RAW_W - 1) { sum += raw_full_matrix[r * MLX_RAW_W + (c + 1)]; count++; }
 
-                        float avg_n = (count > 0) ? (sum / (float)count) : raw_full_matrix[idx];
-                        float diff = fabsf(raw_full_matrix[idx] - avg_n);
-
-                        // 温差大于 1.0°C 说明发生了镜头晃动或边缘位移，立刻向最新邻居相位动态过渡！
-                        if (diff > 1.0f) {
-                            float blend = (diff - 1.0f) / 2.0f;
-                            if (blend > 0.85f) blend = 0.85f;
-                            raw_full_matrix[idx] = (1.0f - blend) * raw_full_matrix[idx] + blend * avg_n;
+                        float avg = sum / (float)count;
+                        float diff = fabsf(raw_full_matrix[idx] - avg);
+                        // 当运动位移导致相差大于 0.8°C 时平滑过渡
+                        if (diff > 0.8f) {
+                            float blend = (diff - 0.8f) / 1.5f;
+                            if (blend > 0.80f) blend = 0.80f;
+                            raw_full_matrix[idx] = (1.0f - blend) * raw_full_matrix[idx] + blend * avg;
                         }
                     }
                 }
             }
 
-            // 3. 极速响应自适应时域降噪（移动时瞬间跟手，静止时深度降噪）
+            // 3. 开源经典时域平滑比：0.70 新数据 + 0.30 历史数据
             for (int i = 0; i < MLX_RAW_PIXELS; i++) {
                 if (filtered_temp[i] < 1.0f) {
                     filtered_temp[i] = raw_full_matrix[i];
                 } else {
-                    float d = fabsf(raw_full_matrix[i] - filtered_temp[i]);
-                    float alpha = (d > 1.8f) ? 0.90f : ((d > 0.6f) ? 0.55f : 0.20f);
-                    filtered_temp[i] = alpha * raw_full_matrix[i] + (1.0f - alpha) * filtered_temp[i];
+                    filtered_temp[i] = 0.70f * raw_full_matrix[i] + 0.30f * filtered_temp[i];
                 }
             }
 
-            // 4. 统计极值与定位（直接在未被模糊破坏的矩阵上计算，五指分离，杜绝长蹼）
+            // 4. 高中心权重空间平滑：消灭马赛克棱角，保留指缝真实间距
+            spatial_filter_proven(filtered_temp, spatial_temp, MLX_RAW_W, MLX_RAW_H);
+
+            // 5. 统计极值与定位
             float cur_min = 200.0f, cur_max = -50.0f;
             int max_idx = 0, min_idx = 0;
             int valid_pts = 0;
 
             for (int i = 0; i < MLX_RAW_PIXELS; i++) {
-                float val = filtered_temp[i];
+                float val = spatial_temp[i];
                 if (val > 1.0f && val < 200.0f) {
                     if (val < cur_min) {
                         cur_min = val;
@@ -262,7 +286,7 @@ void ir_camera_task_main(void *pvParameters)
                 }
             }
 
-            // 5. 统计刷新率
+            // 6. 统计实际帧率
             int64_t now_us = esp_timer_get_time();
             int64_t diff_us = now_us - last_time_us;
             if (diff_us >= 1000000) {
@@ -271,9 +295,8 @@ void ir_camera_task_main(void *pvParameters)
                 last_time_us = now_us;
             }
 
-            float center_t = filtered_temp[12 * MLX_RAW_W + 16];
+            float center_t = spatial_temp[12 * MLX_RAW_W + 16];
 
-            // 格式化文本
             snprintf(text_fps, sizeof(text_fps), "%.1f FPS", real_fps);
             snprintf(text_info, sizeof(text_info),
                      "MAX: %.1f°C    MIN: %.1f°C\nCEN: %.1f°C    ΔT: %.1f°C",
@@ -281,7 +304,7 @@ void ir_camera_task_main(void *pvParameters)
             snprintf(text_max_tag, sizeof(text_max_tag), "◆ %.1f", cur_max);
             snprintf(text_min_tag, sizeof(text_min_tag), "◆ %.1f", cur_min);
 
-            // 映射到 240x180 画面像素坐标（严格 1:1，杜绝脸部拉伸）
+            // 映射到 240x180 画面像素坐标 (等比放大 7.5 倍，彻底消除人脸拉伸)
             int max_px_x = ((max_idx % MLX_RAW_W) * (MLX_INTERP_W - 1)) / (MLX_RAW_W - 1);
             int max_px_y = ((max_idx / MLX_RAW_W) * (MLX_INTERP_H - 1)) / (MLX_RAW_H - 1);
 
@@ -289,9 +312,9 @@ void ir_camera_task_main(void *pvParameters)
             int min_px_y = ((min_idx / MLX_RAW_W) * (MLX_INTERP_H - 1)) / (MLX_RAW_H - 1);
 
             if (valid_pts > 400) {
-                // 动态温差视距保护（温差小于 3.5°C 强制拉开，防止对准白墙噪点翻滚）
-                if ((cur_max - cur_min) < 3.5f) {
-                    cur_max = cur_min + 3.5f;
+                // 动态视距微保护：温差小于 3.0°C 强制拉开，防止对准白墙噪点翻滚
+                if ((cur_max - cur_min) < 3.0f) {
+                    cur_max = cur_min + 3.0f;
                 }
 
                 if (!range_initialized) {
@@ -299,8 +322,8 @@ void ir_camera_task_main(void *pvParameters)
                     smooth_max_t = cur_max;
                     range_initialized = true;
                 } else {
-                    smooth_min_t = 0.20f * cur_min + 0.80f * smooth_min_t;
-                    smooth_max_t = 0.20f * cur_max + 0.80f * smooth_max_t;
+                    smooth_min_t = 0.25f * cur_min + 0.75f * smooth_min_t;
+                    smooth_max_t = 0.25f * cur_max + 0.75f * smooth_max_t;
                 }
 
                 float delta = smooth_max_t - smooth_min_t;
@@ -308,7 +331,7 @@ void ir_camera_task_main(void *pvParameters)
                 float range_inv = 255.0f / delta;
 
                 for (int i = 0; i < MLX_RAW_PIXELS; i++) {
-                    float val = (filtered_temp[i] - smooth_min_t) * range_inv;
+                    float val = (spatial_temp[i] - smooth_min_t) * range_inv;
                     if (val < 0.0f)   val = 0.0f;
                     if (val > 255.0f) val = 255.0f;
                     norm_matrix[i] = (uint8_t)val;
@@ -316,17 +339,17 @@ void ir_camera_task_main(void *pvParameters)
 
                 uint16_t *cur_write_buf = s_display_buf[s_back_idx];
 
-                // 6. 双线性插值输出到后台缓冲
+                // 7. 双线性插值输出到后台缓冲
                 bilinear_scale_to_rgb565(norm_matrix, MLX_RAW_W, MLX_RAW_H,
                                          cur_write_buf, MLX_INTERP_W, MLX_INTERP_H,
                                          s_ironbow_lut);
 
-                // 7. 在显存中绘制工业空心菱形（Diamond ◆）
-                draw_diamond_marker(cur_write_buf, max_px_x, max_px_y, MLX_INTERP_W, MLX_INTERP_H, 5, 0xF800); // 红色最高温
-                draw_diamond_marker(cur_write_buf, min_px_x, min_px_y, MLX_INTERP_W, MLX_INTERP_H, 5, 0x07FF); // 蓝色最低温
+                // 8. 绘制空心菱形与中心指示准星
+                draw_diamond_marker(cur_write_buf, max_px_x, max_px_y, MLX_INTERP_W, MLX_INTERP_H, 5, 0xF800); // 红色菱形
+                draw_diamond_marker(cur_write_buf, min_px_x, min_px_y, MLX_INTERP_W, MLX_INTERP_H, 5, 0x07FF); // 蓝色菱形
                 draw_diamond_marker(cur_write_buf, MLX_INTERP_W / 2, MLX_INTERP_H / 2, MLX_INTERP_W, MLX_INTERP_H, 3, 0xFFFF); // 白色中心
 
-                // 8. 原子切换显存并刷新 UI
+                // 9. 原子更新 UI
                 if (example_lvgl_lock(100)) {
                     s_thermal_img_dsc.data = (const uint8_t *)cur_write_buf;
                     if (img_thermal) {
@@ -340,24 +363,24 @@ void ir_camera_task_main(void *pvParameters)
                         lv_label_set_text(label_info, text_info);
                     }
 
-                    // 动态跟随气泡：画面物理起始 y = 28
+                    // 动态跟随胶囊气泡 (画面 y 偏移 28)
                     if (tag_max) {
-                        int pos_x = (max_px_x > 175) ? (max_px_x - 56) : (max_px_x + 8);
-                        int pos_y = 28 + ((max_px_y < 20) ? (max_px_y + 8) : (max_px_y - 14));
+                        int pos_x = (max_px_x > 175) ? (max_px_x - 58) : (max_px_x + 8);
+                        int pos_y = 28 + ((max_px_y < 22) ? (max_px_y + 8) : (max_px_y - 15));
                         lv_label_set_text(tag_max, text_max_tag);
                         lv_obj_set_pos(tag_max, pos_x, pos_y);
                     }
 
                     if (tag_min) {
-                        int pos_x = (min_px_x > 175) ? (min_px_x - 56) : (min_px_x + 8);
-                        int pos_y = 28 + ((min_px_y < 20) ? (min_px_y + 8) : (min_px_y - 14));
+                        int pos_x = (min_px_x > 175) ? (min_px_x - 58) : (min_px_x + 8);
+                        int pos_y = 28 + ((min_px_y < 22) ? (min_px_y + 8) : (min_px_y - 15));
                         lv_label_set_text(tag_min, text_min_tag);
                         lv_obj_set_pos(tag_min, pos_x, pos_y);
                     }
 
                     example_lvgl_unlock();
 
-                    // 双缓冲交替
+                    // 双缓冲游标切换
                     if (s_display_buf[0] != s_display_buf[1]) {
                         s_back_idx = 1 - s_back_idx;
                     }
