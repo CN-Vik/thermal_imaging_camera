@@ -7,60 +7,86 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "driver/i2c_master.h"
+#include "esp_heap_caps.h"
 #include "MLX90640_I2C_Driver.h"
 #include "MLX90640_API.h"
 #include "ir_mlx90640_app.h"
-#include <math.h>
 
 static const char *TAG = "mlx_app";
 
 TaskHandle_t ir_task_Handle = NULL;
-
 static float emissivity = 0.95f;
 
-// 高清送显显存（240x180 = 43200 像素）
-uint16_t s_display_rgb565[MLX_INTERP_PIXELS];
+// 彻底删除之前的 uint16_t s_display_rgb565[MLX_INTERP_PIXELS]; 避免白占 86KB SRAM
+static uint16_t *s_display_buf[2] = {NULL, NULL};
+static uint8_t  s_back_idx = 0; 
 
-// LVGL 图像描述符
 lv_img_dsc_t s_thermal_img_dsc = {
     .header.always_zero = 0,
     .header.w = MLX_INTERP_W,
     .header.h = MLX_INTERP_H,
     .data_size = MLX_INTERP_PIXELS * sizeof(uint16_t),
     .header.cf = LV_IMG_CF_TRUE_COLOR,
-    .data = (const uint8_t *)s_display_rgb565,
+    .data = NULL, // 由 ir_camera_app_init() 赋值
 };
 
-// 预计算的铁红（Ironbow）调色板
 static uint16_t s_ironbow_lut[256];
-
 const float rate_hz_table[] = {0.5f, 1.0f, 2.0f, 4.0f, 8.0f, 16.0f, 32.0f, 64.0f};
 
 /**
- * @brief 初始化 256 阶铁红查找表：蓝黑 -> 玫红 -> 橙黄 -> 亮白
+ * @brief 在创建 UI 前初始化显存，确保绝无空指针解引用
  */
+esp_err_t ir_camera_app_init(void)
+{
+    size_t buf_size = MLX_INTERP_PIXELS * sizeof(uint16_t);
+
+    // 如果板载 PSRAM 可使用 MALLOC_CAP_SPIRAM，否则用片内 SRAM
+#if CONFIG_SPIRAM
+    s_display_buf[0] = (uint16_t *)heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
+    s_display_buf[1] = (uint16_t *)heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
+#else
+    s_display_buf[0] = (uint16_t *)heap_caps_malloc(buf_size, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+    s_display_buf[1] = (uint16_t *)heap_caps_malloc(buf_size, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+#endif
+
+    if (!s_display_buf[0]) {
+        ESP_LOGE(TAG, "Buffer 0 allocation failed!");
+        return ESP_ERR_NO_MEM;
+    }
+
+    // 优雅降级：若 SRAM 不够分配双缓冲，则回退为单缓冲
+    if (!s_display_buf[1]) {
+        ESP_LOGW(TAG, "RAM tight: Falling back to single buffer!");
+        s_display_buf[1] = s_display_buf[0];
+    }
+
+    // 给初始描述符一个安全合法的地址
+    s_thermal_img_dsc.data = (const uint8_t *)s_display_buf[0];
+    return ESP_OK;
+}
+
 static void init_ironbow_lut(void)
 {
     for (int i = 0; i < 256; i++) {
         float norm = (float)i / 255.0f;
         uint8_t r = 0, g = 0, b = 0;
 
-        if (norm < 0.25f) { // 蓝黑 -> 蓝紫
+        if (norm < 0.25f) {
             float t = norm * 4.0f;
             r = (uint8_t)(t * 40.0f);
             g = 0;
             b = (uint8_t)(t * 160.0f);
-        } else if (norm < 0.5f) { // 蓝紫 -> 玫红
+        } else if (norm < 0.5f) {
             float t = (norm - 0.25f) * 4.0f;
             r = (uint8_t)(40.0f + t * 180.0f);
             g = 0;
             b = (uint8_t)(160.0f - t * 100.0f);
-        } else if (norm < 0.75f) { // 玫红 -> 橙黄
+        } else if (norm < 0.75f) {
             float t = (norm - 0.5f) * 4.0f;
             r = 255;
             g = (uint8_t)(t * 180.0f);
             b = (uint8_t)(60.0f - t * 60.0f);
-        } else { // 橙黄 -> 亮白
+        } else {
             float t = (norm - 0.75f) * 4.0f;
             r = 255;
             g = (uint8_t)(180.0f + t * 75.0f);
@@ -70,9 +96,6 @@ static void init_ironbow_lut(void)
     }
 }
 
-/**
- * @brief 16位定点数双线性插值引擎（32x24 -> 240x180）
- */
 static void bilinear_scale_to_rgb565(const uint8_t *src, int src_w, int src_h,
                                      uint16_t *dst, int dst_w, int dst_h,
                                      const uint16_t *lut)
@@ -109,9 +132,6 @@ static void bilinear_scale_to_rgb565(const uint8_t *src, int src_w, int src_h,
     }
 }
 
-/**
- * @brief 在画面中心打上白色十字准星
- */
 static inline void draw_center_crosshair(uint16_t *buf, int w, int h, uint16_t color)
 {
     int cx = w / 2;
@@ -134,7 +154,6 @@ void ir_camera_task_main(void *pvParameters)
     MLX90640_SetRefreshRate(MLX90640_ADDR, RefreshRate);
     MLX90640_SetChessMode(MLX90640_ADDR);
 
-    // 核心改动 1：全部使用 calloc 强制内存清零，严防野数据打爆浮点范围！
     uint16_t *ir_frame_data = (uint16_t *)calloc(834, sizeof(uint16_t));
     uint16_t *eerom_ir_data = (uint16_t *)calloc(832, sizeof(uint16_t));
     float *ir_temp_data     = (float *)calloc(MLX_RAW_PIXELS, sizeof(float));
@@ -150,7 +169,7 @@ void ir_camera_task_main(void *pvParameters)
 
     MLX90640_DumpEE(MLX90640_ADDR, eerom_ir_data);
     MLX90640_ExtractParameters(eerom_ir_data, mlx_params);
-    free(eerom_ir_data); // 释放 EEPROM 数组
+    free(eerom_ir_data);
 
     char text_buf[80];
     uint32_t frame_count = 0;
@@ -163,18 +182,14 @@ void ir_camera_task_main(void *pvParameters)
 
     while (1) 
     {
-        // 1. 读取单子页数据
         int status = MLX90640_GetFrameData(MLX90640_ADDR, ir_frame_data);
         if (status >= 0) {
-            // 获取当前返回的是 Subpage 0 还是 Subpage 1
             int subpage = ir_frame_data[833]; 
 
             float ta = MLX90640_GetTa(ir_frame_data, mlx_params);
             MLX90640_CalculateTo(ir_frame_data, mlx_params, emissivity, ta - TA_SHIFT, ir_temp_data);
             frame_count++;
 
-            // 核心修复 1：只对当前硬件实际测出来的子页点做滤波！隔壁点绝不乱动！
-            // Chess 模式下：(行 + 列) % 2 严格对应当前子页
             for (int i = 0; i < MLX_RAW_PIXELS; i++) {
                 int r = i / MLX_RAW_W;
                 int c = i % MLX_RAW_W;
@@ -184,14 +199,12 @@ void ir_camera_task_main(void *pvParameters)
                         if (filtered_temp[i] < 1.0f) {
                             filtered_temp[i] = ir_temp_data[i];
                         } else {
-                            // 核心修复 2：统一黄金比例（0.65 新数据 + 0.35 历史），干掉残影且无撕裂
                             filtered_temp[i] = 0.65f * ir_temp_data[i] + 0.35f * filtered_temp[i];
                         }
                     }
                 }
             }
 
-            // 2. 统计极值
             float cur_min = 200.0f, cur_max = -50.0f;
             int valid_pts = 0;
             for (int i = 0; i < MLX_RAW_PIXELS; i++) {
@@ -202,13 +215,28 @@ void ir_camera_task_main(void *pvParameters)
                 }
             }
 
-            // 等两帧交织凑满全屏数据后再送显
+            // 计算帧率与中心温度
+            int64_t now_us = esp_timer_get_time();
+            int64_t diff_us = now_us - last_time_us;
+            if (diff_us >= 1000000) {
+                real_fps = (float)frame_count * 1000000.0f / (float)diff_us;
+                frame_count = 0;
+                last_time_us = now_us;
+            }
+
+            float center_t = filtered_temp[12 * MLX_RAW_W + 16];
+            int rate_code = MLX90640_GetRefreshRate(MLX90640_ADDR);
+            float set_hz = (rate_code >= 0 && rate_code <= 7) ? rate_hz_table[rate_code] : 0.0f;
+
+            snprintf(text_buf, sizeof(text_buf),
+                     "Max:%.1f Min:%.1f Cen:%.1f\nFPS:%.1f (Set:%.0fHz)",
+                     cur_max, cur_min, center_t, real_fps, set_hz);
+
             if (valid_pts > 400) {
                 if ((cur_max - cur_min) < 3.0f) {
                     cur_max = cur_min + 3.0f;
                 }
 
-                // 核心修复 3：极值跟手度提升至 0.35，避免镜头晃动时明暗反应迟钝
                 if (!range_initialized) {
                     smooth_min_t = cur_min;
                     smooth_max_t = cur_max;
@@ -229,45 +257,39 @@ void ir_camera_task_main(void *pvParameters)
                     norm_matrix[i] = (uint8_t)val;
                 }
 
-                // 双线性插值直接输出到 240x180 显存
+                // 写入后台缓冲
+                uint16_t *cur_write_buf = s_display_buf[s_back_idx];
+
                 bilinear_scale_to_rgb565(norm_matrix, MLX_RAW_W, MLX_RAW_H,
-                                         s_display_rgb565, MLX_INTERP_W, MLX_INTERP_H,
+                                         cur_write_buf, MLX_INTERP_W, MLX_INTERP_H,
                                          s_ironbow_lut);
 
-                // 中央白色十字准星
-                draw_center_crosshair(s_display_rgb565, MLX_INTERP_W, MLX_INTERP_H, 0xFFFF);
-            }
+                draw_center_crosshair(cur_write_buf, MLX_INTERP_W, MLX_INTERP_H, 0xFFFF);
 
-            // 7. 计算帧率与中心温度
-            int64_t now_us = esp_timer_get_time();
-            int64_t diff_us = now_us - last_time_us;
-            if (diff_us >= 1000000) {
-                real_fps = (float)frame_count * 1000000.0f / (float)diff_us;
-                frame_count = 0;
-                last_time_us = now_us;
-            }
+                // 单次原子操作刷新 UI，消除重复刷新
+                if (example_lvgl_lock(100)) {
+                    s_thermal_img_dsc.data = (const uint8_t *)cur_write_buf;
+                    if (img_thermal) {
+                        lv_img_set_src(img_thermal, &s_thermal_img_dsc);
+                        lv_obj_invalidate(img_thermal);
+                    }
+                    if (label_info) {
+                        lv_label_set_text(label_info, text_buf);
+                    }
+                    example_lvgl_unlock();
 
-            float center_t = filtered_temp[12 * MLX_RAW_W + 16];
-            int rate_code = MLX90640_GetRefreshRate(MLX90640_ADDR);
-            float set_hz = (rate_code >= 0 && rate_code <= 7) ? rate_hz_table[rate_code] : 0.0f;
-
-            snprintf(text_buf, sizeof(text_buf),
-                     "Max:%.1f Min:%.1f Cen:%.1f\nFPS:%.1f (Set:%.0fHz)",
-                     cur_max, cur_min, center_t, real_fps, set_hz);
-
-            // 8. 刷新 LVGL 画面
-            if (example_lvgl_lock(100)) {
-                if (img_thermal) {
-                    lv_obj_invalidate(img_thermal);
+                    if (s_display_buf[0] != s_display_buf[1]) {
+                        s_back_idx = 1 - s_back_idx; // 切换 Ping-Pong 游标
+                    }
                 }
-                if (label_info) {
-                    lv_label_set_text(label_info, text_buf);
-                }
-                example_lvgl_unlock();
             }
         }
 
-        // vTaskDelay(pdMS_TO_TICKS(1));
-        taskYIELD();
+        // 成功处理完或失败均让步，避免死循环跑满 CPU
+        if (status >= 0) {
+            vTaskDelay(pdMS_TO_TICKS(5));
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
     }
 }

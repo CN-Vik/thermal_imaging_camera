@@ -368,6 +368,9 @@ void app_main(void)
         0
     );
 
+    ESP_LOGI(TAG, "Init thermal buffer");
+    ESP_ERROR_CHECK(ir_camera_app_init()); // 务必在创建 UI 前分配显存！
+
     ESP_LOGI(TAG, "Display LVGL Meter Widget");
     // Lock the mutex due to the LVGL APIs are not thread-safe
     if (example_lvgl_lock(-1))
