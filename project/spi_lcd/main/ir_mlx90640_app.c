@@ -17,7 +17,6 @@ static const char *TAG = "mlx_app";
 TaskHandle_t ir_task_Handle = NULL;
 static float emissivity = 0.95f;
 
-// 彻底删除之前的 uint16_t s_display_rgb565[MLX_INTERP_PIXELS]; 避免白占 86KB SRAM
 static uint16_t *s_display_buf[2] = {NULL, NULL};
 static uint8_t  s_back_idx = 0; 
 
@@ -27,20 +26,16 @@ lv_img_dsc_t s_thermal_img_dsc = {
     .header.h = MLX_INTERP_H,
     .data_size = MLX_INTERP_PIXELS * sizeof(uint16_t),
     .header.cf = LV_IMG_CF_TRUE_COLOR,
-    .data = NULL, // 由 ir_camera_app_init() 赋值
+    .data = NULL,
 };
 
 static uint16_t s_ironbow_lut[256];
 const float rate_hz_table[] = {0.5f, 1.0f, 2.0f, 4.0f, 8.0f, 16.0f, 32.0f, 64.0f};
 
-/**
- * @brief 在创建 UI 前初始化显存，确保绝无空指针解引用
- */
 esp_err_t ir_camera_app_init(void)
 {
     size_t buf_size = MLX_INTERP_PIXELS * sizeof(uint16_t);
 
-    // 如果板载 PSRAM 可使用 MALLOC_CAP_SPIRAM，否则用片内 SRAM
 #if CONFIG_SPIRAM
     s_display_buf[0] = (uint16_t *)heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
     s_display_buf[1] = (uint16_t *)heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
@@ -53,14 +48,11 @@ esp_err_t ir_camera_app_init(void)
         ESP_LOGE(TAG, "Buffer 0 allocation failed!");
         return ESP_ERR_NO_MEM;
     }
-
-    // 优雅降级：若 SRAM 不够分配双缓冲，则回退为单缓冲
     if (!s_display_buf[1]) {
-        ESP_LOGW(TAG, "RAM tight: Falling back to single buffer!");
+        ESP_LOGW(TAG, "RAM tight: Fallback to single buffer!");
         s_display_buf[1] = s_display_buf[0];
     }
 
-    // 给初始描述符一个安全合法的地址
     s_thermal_img_dsc.data = (const uint8_t *)s_display_buf[0];
     return ESP_OK;
 }
@@ -74,12 +66,10 @@ static void init_ironbow_lut(void)
         if (norm < 0.25f) {
             float t = norm * 4.0f;
             r = (uint8_t)(t * 40.0f);
-            g = 0;
             b = (uint8_t)(t * 160.0f);
         } else if (norm < 0.5f) {
             float t = (norm - 0.25f) * 4.0f;
             r = (uint8_t)(40.0f + t * 180.0f);
-            g = 0;
             b = (uint8_t)(160.0f - t * 100.0f);
         } else if (norm < 0.75f) {
             float t = (norm - 0.5f) * 4.0f;
@@ -132,11 +122,12 @@ static void bilinear_scale_to_rgb565(const uint8_t *src, int src_w, int src_h,
     }
 }
 
-static inline void draw_center_crosshair(uint16_t *buf, int w, int h, uint16_t color)
+/**
+ * @brief 在指定坐标打上带色彩的十字准星
+ */
+static inline void draw_marker_crosshair(uint16_t *buf, int cx, int cy, int w, int h, uint16_t color)
 {
-    int cx = w / 2;
-    int cy = h / 2;
-    for (int d = -6; d <= 6; d++) {
+    for (int d = -5; d <= 5; d++) {
         if (d == 0) continue;
         if (cx + d >= 0 && cx + d < w) buf[cy * w + (cx + d)] = color;
         if (cy + d >= 0 && cy + d < h) buf[(cy + d) * w + cx] = color;
@@ -154,13 +145,13 @@ void ir_camera_task_main(void *pvParameters)
     MLX90640_SetRefreshRate(MLX90640_ADDR, RefreshRate);
     MLX90640_SetChessMode(MLX90640_ADDR);
 
-    uint16_t *ir_frame_data = (uint16_t *)calloc(834, sizeof(uint16_t));
-    uint16_t *eerom_ir_data = (uint16_t *)calloc(832, sizeof(uint16_t));
-    float *ir_temp_data     = (float *)calloc(MLX_RAW_PIXELS, sizeof(float));
+    uint16_t *ir_frame_data    = (uint16_t *)calloc(834, sizeof(uint16_t));
+    uint16_t *eerom_ir_data    = (uint16_t *)calloc(832, sizeof(uint16_t));
+    float *ir_temp_data        = (float *)calloc(MLX_RAW_PIXELS, sizeof(float));
     paramsMLX90640 *mlx_params = (paramsMLX90640 *)calloc(1, sizeof(paramsMLX90640));
 
-    float *filtered_temp    = (float *)calloc(MLX_RAW_PIXELS, sizeof(float));
-    uint8_t *norm_matrix    = (uint8_t *)calloc(MLX_RAW_PIXELS, sizeof(uint8_t));
+    float *filtered_temp       = (float *)calloc(MLX_RAW_PIXELS, sizeof(float));
+    uint8_t *norm_matrix       = (uint8_t *)calloc(MLX_RAW_PIXELS, sizeof(uint8_t));
 
     if (!ir_frame_data || !eerom_ir_data || !ir_temp_data || !mlx_params || !filtered_temp || !norm_matrix) {
         ESP_LOGE(TAG, "Critical: calloc failed, Out of memory!");
@@ -171,7 +162,11 @@ void ir_camera_task_main(void *pvParameters)
     MLX90640_ExtractParameters(eerom_ir_data, mlx_params);
     free(eerom_ir_data);
 
-    char text_buf[80];
+    char text_info[96];
+    char text_fps[32];
+    char text_max_tag[16];
+    char text_min_tag[16];
+
     uint32_t frame_count = 0;
     float real_fps = 0.0f;
     int64_t last_time_us = esp_timer_get_time();
@@ -205,17 +200,26 @@ void ir_camera_task_main(void *pvParameters)
                 }
             }
 
+            // 统计极值与定位坐标
             float cur_min = 200.0f, cur_max = -50.0f;
+            int max_idx = 0, min_idx = 0;
             int valid_pts = 0;
+
             for (int i = 0; i < MLX_RAW_PIXELS; i++) {
                 if (filtered_temp[i] > 1.0f && filtered_temp[i] < 200.0f) {
-                    if (filtered_temp[i] < cur_min) cur_min = filtered_temp[i];
-                    if (filtered_temp[i] > cur_max) cur_max = filtered_temp[i];
+                    if (filtered_temp[i] < cur_min) {
+                        cur_min = filtered_temp[i];
+                        min_idx = i;
+                    }
+                    if (filtered_temp[i] > cur_max) {
+                        cur_max = filtered_temp[i];
+                        max_idx = i;
+                    }
                     valid_pts++;
                 }
             }
 
-            // 计算帧率与中心温度
+            // 计算 FPS
             int64_t now_us = esp_timer_get_time();
             int64_t diff_us = now_us - last_time_us;
             if (diff_us >= 1000000) {
@@ -225,12 +229,25 @@ void ir_camera_task_main(void *pvParameters)
             }
 
             float center_t = filtered_temp[12 * MLX_RAW_W + 16];
-            int rate_code = MLX90640_GetRefreshRate(MLX90640_ADDR);
-            float set_hz = (rate_code >= 0 && rate_code <= 7) ? rate_hz_table[rate_code] : 0.0f;
 
-            snprintf(text_buf, sizeof(text_buf),
-                     "Max:%.1f Min:%.1f Cen:%.1f\nFPS:%.1f (Set:%.0fHz)",
-                     cur_max, cur_min, center_t, real_fps, set_hz);
+            // 格式化各栏目文本
+            snprintf(text_fps, sizeof(text_fps), "FPS: %.1f", real_fps);
+            snprintf(text_info, sizeof(text_info),
+                     "Max:%.1f  Min:%.1f\nCen:%.1f  ΔT:%.1f",
+                     cur_max, cur_min, center_t, (cur_max - cur_min));
+            snprintf(text_max_tag, sizeof(text_max_tag), "▲%.1f", cur_max);
+            snprintf(text_min_tag, sizeof(text_min_tag), "▼%.1f", cur_min);
+
+            // 将 32x24 矩阵索引映射为 240x180 画面像素坐标
+            int max_raw_r = max_idx / MLX_RAW_W;
+            int max_raw_c = max_idx % MLX_RAW_W;
+            int max_px_x = (max_raw_c * (MLX_INTERP_W - 1)) / (MLX_RAW_W - 1);
+            int max_px_y = (max_raw_r * (MLX_INTERP_H - 1)) / (MLX_RAW_H - 1);
+
+            int min_raw_r = min_idx / MLX_RAW_W;
+            int min_raw_c = min_idx % MLX_RAW_W;
+            int min_px_x = (min_raw_c * (MLX_INTERP_W - 1)) / (MLX_RAW_W - 1);
+            int min_px_y = (min_raw_r * (MLX_INTERP_H - 1)) / (MLX_RAW_H - 1);
 
             if (valid_pts > 400) {
                 if ((cur_max - cur_min) < 3.0f) {
@@ -257,35 +274,57 @@ void ir_camera_task_main(void *pvParameters)
                     norm_matrix[i] = (uint8_t)val;
                 }
 
-                // 写入后台缓冲
                 uint16_t *cur_write_buf = s_display_buf[s_back_idx];
 
+                // 双线性插值
                 bilinear_scale_to_rgb565(norm_matrix, MLX_RAW_W, MLX_RAW_H,
                                          cur_write_buf, MLX_INTERP_W, MLX_INTERP_H,
                                          s_ironbow_lut);
 
-                draw_center_crosshair(cur_write_buf, MLX_INTERP_W, MLX_INTERP_H, 0xFFFF);
+                // 绘制 3 组指示十字准星
+                draw_marker_crosshair(cur_write_buf, MLX_INTERP_W / 2, MLX_INTERP_H / 2, MLX_INTERP_W, MLX_INTERP_H, 0xFFFF); // 白色中心
+                draw_marker_crosshair(cur_write_buf, max_px_x, max_px_y, MLX_INTERP_W, MLX_INTERP_H, 0xF800); // 红色最高温
+                draw_marker_crosshair(cur_write_buf, min_px_x, min_px_y, MLX_INTERP_W, MLX_INTERP_H, 0x07FF); // 青蓝最低温
 
-                // 单次原子操作刷新 UI，消除重复刷新
+                // 刷新 UI 与动态坐标追踪
                 if (example_lvgl_lock(100)) {
                     s_thermal_img_dsc.data = (const uint8_t *)cur_write_buf;
                     if (img_thermal) {
                         lv_img_set_src(img_thermal, &s_thermal_img_dsc);
                         lv_obj_invalidate(img_thermal);
                     }
-                    if (label_info) {
-                        lv_label_set_text(label_info, text_buf);
+                    if (label_status_right) {
+                        lv_label_set_text(label_status_right, text_fps);
                     }
+                    if (label_info) {
+                        lv_label_set_text(label_info, text_info);
+                    }
+
+                    // 最高温标签防溢出贴靠 (图像 y 起始于 24)
+                    if (tag_max) {
+                        int pos_x = (max_px_x > 185) ? (max_px_x - 45) : (max_px_x + 6);
+                        int pos_y = 24 + ((max_px_y < 12) ? (max_px_y + 6) : (max_px_y - 12));
+                        lv_label_set_text(tag_max, text_max_tag);
+                        lv_obj_set_pos(tag_max, pos_x, pos_y);
+                    }
+
+                    // 最低温标签防溢出贴靠
+                    if (tag_min) {
+                        int pos_x = (min_px_x > 185) ? (min_px_x - 45) : (min_px_x + 6);
+                        int pos_y = 24 + ((min_px_y < 12) ? (min_px_y + 6) : (min_px_y - 12));
+                        lv_label_set_text(tag_min, text_min_tag);
+                        lv_obj_set_pos(tag_min, pos_x, pos_y);
+                    }
+
                     example_lvgl_unlock();
 
                     if (s_display_buf[0] != s_display_buf[1]) {
-                        s_back_idx = 1 - s_back_idx; // 切换 Ping-Pong 游标
+                        s_back_idx = 1 - s_back_idx;
                     }
                 }
             }
         }
 
-        // 成功处理完或失败均让步，避免死循环跑满 CPU
         if (status >= 0) {
             vTaskDelay(pdMS_TO_TICKS(5));
         } else {
