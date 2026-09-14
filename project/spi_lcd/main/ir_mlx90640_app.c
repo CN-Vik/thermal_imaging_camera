@@ -32,6 +32,10 @@ lv_img_dsc_t s_thermal_img_dsc = {
 static uint16_t s_ironbow_lut[256];
 const float rate_hz_table[] = {0.5f, 1.0f, 2.0f, 4.0f, 8.0f, 16.0f, 32.0f, 64.0f};
 
+// 预计算的 1:1 无畸变中心裁剪插值参数
+static int32_t s_x_start_fp = 0;
+static uint32_t s_scale_fp = 0;
+
 esp_err_t ir_camera_app_init(void)
 {
     size_t buf_size = MLX_INTERP_PIXELS * sizeof(uint16_t);
@@ -52,6 +56,11 @@ esp_err_t ir_camera_app_init(void)
         ESP_LOGW(TAG, "RAM tight: Fallback to single buffer!");
         s_display_buf[1] = s_display_buf[0];
     }
+
+    // 1:1 无畸变定点数几何比例计算：横向与纵向缩放比强制严格相等
+    s_scale_fp = ((MLX_RAW_H - 1) << 16) / (MLX_INTERP_H - 1); // Y 缩放比: 23*65536/279 ≈ 5402
+    // X 方向中心对齐：提取传感器中央视域，杜绝头部椭圆拉伸
+    s_x_start_fp = ((MLX_RAW_W - 1) << 15) - (int32_t)(((MLX_INTERP_W - 1) * s_scale_fp) / 2);
 
     s_thermal_img_dsc.data = (const uint8_t *)s_display_buf[0];
     return ESP_OK;
@@ -89,11 +98,11 @@ static void init_ironbow_lut(void)
 }
 
 /**
- * @brief 开源标杆项目经典滤波核：
- * 中心高达 10.0，四周微扩散（1.0 和 0.5）。
- * 抹平传感器白噪声和马赛克棱角，同时保留指缝温差陡度，绝不长蹼！
+ * @brief 自然红外热场平滑核：
+ * 中心权重 8.0，十字邻域 1.5，对角 0.5。
+ * 既恢复了温润如玉、无马赛克方块的图像质感，又保留了手指轮廓陡度，不长蹼！
  */
-static void spatial_filter_proven(const float *src, float *dst, int w, int h)
+static void spatial_filter_natural(const float *src, float *dst, int w, int h)
 {
     for (int r = 0; r < h; r++) {
         int r_prev = (r > 0) ? (r - 1) : 0;
@@ -103,8 +112,8 @@ static void spatial_filter_proven(const float *src, float *dst, int w, int h)
             int c_prev = (c > 0) ? (c - 1) : 0;
             int c_next = (c < w - 1) ? (c + 1) : (c - 1);
 
-            float sum = src[r * w + c] * 10.0f
-                      + (src[r_prev * w + c] + src[r_next * w + c] + src[r * w + c_prev] + src[r * w + c_next]) * 1.0f
+            float sum = src[r * w + c] * 8.0f
+                      + (src[r_prev * w + c] + src[r_next * w + c] + src[r * w + c_prev] + src[r * w + c_next]) * 1.5f
                       + (src[r_prev * w + c_prev] + src[r_prev * w + c_next] + src[r_next * w + c_prev] + src[r_next * w + c_next]) * 0.5f;
 
             dst[r * w + c] = sum * (1.0f / 16.0f);
@@ -113,17 +122,15 @@ static void spatial_filter_proven(const float *src, float *dst, int w, int h)
 }
 
 /**
- * @brief 定点数双线性插值 (32x24 -> 240x180 等比不形变)
+ * @brief 全屏无畸变定点数双线性插值引擎 (32x24 -> 240x280)
+ * 物理比例 1:1，全屏铺满底图，零横纵比拉扯
  */
-static void bilinear_scale_to_rgb565(const uint8_t *src, int src_w, int src_h,
-                                     uint16_t *dst, int dst_w, int dst_h,
-                                     const uint16_t *lut)
+static void bilinear_scale_fullscreen_1to1(const uint8_t *src, int src_w, int src_h,
+                                           uint16_t *dst, int dst_w, int dst_h,
+                                           const uint16_t *lut)
 {
-    uint32_t x_ratio = ((src_w - 1) << 16) / (dst_w - 1);
-    uint32_t y_ratio = ((src_h - 1) << 16) / (dst_h - 1);
-
     for (int y = 0; y < dst_h; y++) {
-        uint32_t y_fp = y * y_ratio;
+        uint32_t y_fp = y * s_scale_fp;
         int y0 = y_fp >> 16;
         int y1 = (y0 < src_h - 1) ? y0 + 1 : y0;
         uint32_t y_diff = y_fp & 0xFFFF;
@@ -133,8 +140,9 @@ static void bilinear_scale_to_rgb565(const uint8_t *src, int src_w, int src_h,
         const uint8_t *p_y1 = &src[y1 * src_w];
         uint16_t *dst_row = &dst[y * dst_w];
 
+        int32_t x_fp = s_x_start_fp;
+
         for (int x = 0; x < dst_w; x++) {
-            uint32_t x_fp = x * x_ratio;
             int x0 = x_fp >> 16;
             int x1 = (x0 < src_w - 1) ? x0 + 1 : x0;
             uint32_t x_diff = x_fp & 0xFFFF;
@@ -143,10 +151,11 @@ static void bilinear_scale_to_rgb565(const uint8_t *src, int src_w, int src_h,
             uint32_t top = (p_y0[x0] * x_diff_inv + p_y0[x1] * x_diff) >> 16;
             uint32_t bot = (p_y1[x0] * x_diff_inv + p_y1[x1] * x_diff) >> 16;
 
-            uint32_t pixel_val = (top * y_diff_inv + bot * y_diff) >> 16;
-            if (pixel_val > 255) pixel_val = 255;
+            uint32_t val = (top * y_diff_inv + bot * y_diff) >> 16;
+            if (val > 255) val = 255;
 
-            dst_row[x] = lut[pixel_val];
+            dst_row[x] = lut[val];
+            x_fp += s_scale_fp;
         }
     }
 }
@@ -218,7 +227,7 @@ void ir_camera_task_main(void *pvParameters)
             MLX90640_CalculateTo(ir_frame_data, mlx_params, emissivity, ta - TA_SHIFT, ir_temp_data);
             frame_count++;
 
-            // 1. 刷新当前子页真实数据
+            // 1. 刷新当前硬件子页真实测量点
             for (int i = 0; i < MLX_RAW_PIXELS; i++) {
                 int r = i / MLX_RAW_W;
                 int c = i % MLX_RAW_W;
@@ -230,7 +239,7 @@ void ir_camera_task_main(void *pvParameters)
                 }
             }
 
-            // 2. 运动自适应邻域补齐（彻底消除甩动镜头时的黑白交错拉链马赛克）
+            // 2. 正交子页运动补偿：移动时消除棋盘相差引起的交替拉链马赛克
             for (int r = 0; r < MLX_RAW_H; r++) {
                 for (int c = 0; c < MLX_RAW_W; c++) {
                     if (((r + c) & 1) != subpage) {
@@ -244,29 +253,30 @@ void ir_camera_task_main(void *pvParameters)
 
                         float avg = sum / (float)count;
                         float diff = fabsf(raw_full_matrix[idx] - avg);
-                        // 当运动位移导致相差大于 0.8°C 时平滑过渡
                         if (diff > 0.8f) {
                             float blend = (diff - 0.8f) / 1.5f;
-                            if (blend > 0.80f) blend = 0.80f;
+                            if (blend > 0.75f) blend = 0.75f;
                             raw_full_matrix[idx] = (1.0f - blend) * raw_full_matrix[idx] + blend * avg;
                         }
                     }
                 }
             }
 
-            // 3. 开源经典时域平滑比：0.70 新数据 + 0.30 历史数据
+            // 3. 时域滤波：大温差快速响应无残影，微温差深度平滑降噪
             for (int i = 0; i < MLX_RAW_PIXELS; i++) {
                 if (filtered_temp[i] < 1.0f) {
                     filtered_temp[i] = raw_full_matrix[i];
                 } else {
-                    filtered_temp[i] = 0.70f * raw_full_matrix[i] + 0.30f * filtered_temp[i];
+                    float d = fabsf(raw_full_matrix[i] - filtered_temp[i]);
+                    float alpha = (d > 1.6f) ? 0.85f : ((d > 0.5f) ? 0.45f : 0.16f);
+                    filtered_temp[i] = alpha * raw_full_matrix[i] + (1.0f - alpha) * filtered_temp[i];
                 }
             }
 
-            // 4. 高中心权重空间平滑：消灭马赛克棱角，保留指缝真实间距
-            spatial_filter_proven(filtered_temp, spatial_temp, MLX_RAW_W, MLX_RAW_H);
+            // 4. 自然红外热场滤波：找回舒适的连续红外热像感
+            spatial_filter_natural(filtered_temp, spatial_temp, MLX_RAW_W, MLX_RAW_H);
 
-            // 5. 统计极值与定位
+            // 5. 统计极值
             float cur_min = 200.0f, cur_max = -50.0f;
             int max_idx = 0, min_idx = 0;
             int valid_pts = 0;
@@ -304,15 +314,23 @@ void ir_camera_task_main(void *pvParameters)
             snprintf(text_max_tag, sizeof(text_max_tag), "◆ %.1f", cur_max);
             snprintf(text_min_tag, sizeof(text_min_tag), "◆ %.1f", cur_min);
 
-            // 映射到 240x180 画面像素坐标 (等比放大 7.5 倍，彻底消除人脸拉伸)
-            int max_px_x = ((max_idx % MLX_RAW_W) * (MLX_INTERP_W - 1)) / (MLX_RAW_W - 1);
-            int max_px_y = ((max_idx / MLX_RAW_W) * (MLX_INTERP_H - 1)) / (MLX_RAW_H - 1);
+            // 将传感器阵列坐标映射到 1:1 无畸变全屏 (240x280) 像素位置
+            int max_raw_r = max_idx / MLX_RAW_W;
+            int max_raw_c = max_idx % MLX_RAW_W;
+            int max_px_y = (max_raw_r * (MLX_INTERP_H - 1)) / (MLX_RAW_H - 1);
+            int max_px_x = (int)(((max_raw_c << 16) - s_x_start_fp) / s_scale_fp);
+            if (max_px_x < 0) max_px_x = 0;
+            if (max_px_x >= MLX_INTERP_W) max_px_x = MLX_INTERP_W - 1;
 
-            int min_px_x = ((min_idx % MLX_RAW_W) * (MLX_INTERP_W - 1)) / (MLX_RAW_W - 1);
-            int min_px_y = ((min_idx / MLX_RAW_W) * (MLX_INTERP_H - 1)) / (MLX_RAW_H - 1);
+            int min_raw_r = min_idx / MLX_RAW_W;
+            int min_raw_c = min_idx % MLX_RAW_W;
+            int min_px_y = (min_raw_r * (MLX_INTERP_H - 1)) / (MLX_RAW_H - 1);
+            int min_px_x = (int)(((min_raw_c << 16) - s_x_start_fp) / s_scale_fp);
+            if (min_px_x < 0) min_px_x = 0;
+            if (min_px_x >= MLX_INTERP_W) min_px_x = MLX_INTERP_W - 1;
 
             if (valid_pts > 400) {
-                // 动态视距微保护：温差小于 3.0°C 强制拉开，防止对准白墙噪点翻滚
+                // 动态视距平滑
                 if ((cur_max - cur_min) < 3.0f) {
                     cur_max = cur_min + 3.0f;
                 }
@@ -322,8 +340,8 @@ void ir_camera_task_main(void *pvParameters)
                     smooth_max_t = cur_max;
                     range_initialized = true;
                 } else {
-                    smooth_min_t = 0.25f * cur_min + 0.75f * smooth_min_t;
-                    smooth_max_t = 0.25f * cur_max + 0.75f * smooth_max_t;
+                    smooth_min_t = 0.20f * cur_min + 0.80f * smooth_min_t;
+                    smooth_max_t = 0.20f * cur_max + 0.80f * smooth_max_t;
                 }
 
                 float delta = smooth_max_t - smooth_min_t;
@@ -339,17 +357,17 @@ void ir_camera_task_main(void *pvParameters)
 
                 uint16_t *cur_write_buf = s_display_buf[s_back_idx];
 
-                // 7. 双线性插值输出到后台缓冲
-                bilinear_scale_to_rgb565(norm_matrix, MLX_RAW_W, MLX_RAW_H,
-                                         cur_write_buf, MLX_INTERP_W, MLX_INTERP_H,
-                                         s_ironbow_lut);
+                // 7. 全屏 1:1 无畸变插值
+                bilinear_scale_fullscreen_1to1(norm_matrix, MLX_RAW_W, MLX_RAW_H,
+                                               cur_write_buf, MLX_INTERP_W, MLX_INTERP_H,
+                                               s_ironbow_lut);
 
-                // 8. 绘制空心菱形与中心指示准星
-                draw_diamond_marker(cur_write_buf, max_px_x, max_px_y, MLX_INTERP_W, MLX_INTERP_H, 5, 0xF800); // 红色菱形
-                draw_diamond_marker(cur_write_buf, min_px_x, min_px_y, MLX_INTERP_W, MLX_INTERP_H, 5, 0x07FF); // 蓝色菱形
-                draw_diamond_marker(cur_write_buf, MLX_INTERP_W / 2, MLX_INTERP_H / 2, MLX_INTERP_W, MLX_INTERP_H, 3, 0xFFFF); // 白色中心
+                // 8. 绘制空心菱形与中心准星 (直接画在底图显存上)
+                draw_diamond_marker(cur_write_buf, max_px_x, max_px_y, MLX_INTERP_W, MLX_INTERP_H, 5, 0xF800);
+                draw_diamond_marker(cur_write_buf, min_px_x, min_px_y, MLX_INTERP_W, MLX_INTERP_H, 5, 0x07FF);
+                draw_diamond_marker(cur_write_buf, MLX_INTERP_W / 2, MLX_INTERP_H / 2, MLX_INTERP_W, MLX_INTERP_H, 3, 0xFFFF);
 
-                // 9. 原子更新 UI
+                // 9. 更新上层半透明悬浮 HUD
                 if (example_lvgl_lock(100)) {
                     s_thermal_img_dsc.data = (const uint8_t *)cur_write_buf;
                     if (img_thermal) {
@@ -363,24 +381,23 @@ void ir_camera_task_main(void *pvParameters)
                         lv_label_set_text(label_info, text_info);
                     }
 
-                    // 动态跟随胶囊气泡 (画面 y 偏移 28)
+                    // 动态跟随胶囊气泡 (避开上下 HUD 区)
                     if (tag_max) {
                         int pos_x = (max_px_x > 175) ? (max_px_x - 58) : (max_px_x + 8);
-                        int pos_y = 28 + ((max_px_y < 22) ? (max_px_y + 8) : (max_px_y - 15));
+                        int pos_y = (max_px_y < 45) ? (max_px_y + 10) : ((max_px_y > 215) ? (max_px_y - 18) : (max_px_y - 8));
                         lv_label_set_text(tag_max, text_max_tag);
                         lv_obj_set_pos(tag_max, pos_x, pos_y);
                     }
 
                     if (tag_min) {
                         int pos_x = (min_px_x > 175) ? (min_px_x - 58) : (min_px_x + 8);
-                        int pos_y = 28 + ((min_px_y < 22) ? (min_px_y + 8) : (min_px_y - 15));
+                        int pos_y = (min_px_y < 45) ? (min_px_y + 10) : ((min_px_y > 215) ? (min_px_y - 18) : (min_px_y - 8));
                         lv_label_set_text(tag_min, text_min_tag);
                         lv_obj_set_pos(tag_min, pos_x, pos_y);
                     }
 
                     example_lvgl_unlock();
 
-                    // 双缓冲游标切换
                     if (s_display_buf[0] != s_display_buf[1]) {
                         s_back_idx = 1 - s_back_idx;
                     }
