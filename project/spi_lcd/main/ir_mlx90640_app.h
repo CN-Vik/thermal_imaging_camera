@@ -2,7 +2,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "esp_err.h"   // 解决 esp_err_t 编译错误
+#include "esp_err.h"
 #include "lvgl.h"
 
 #ifdef __cplusplus
@@ -16,7 +16,7 @@ extern "C" {
 #define MLX_W                   MLX_RAW_W
 #define MLX_H                   MLX_RAW_H
 
-// 4:3 送显分辨率
+// 严格锁定 4:3 比例 (横向纵向均放大 7.5 倍，几何 1:1 杜绝变形拉伸)
 #define MLX_INTERP_W            240
 #define MLX_INTERP_H            180
 #define MLX_INTERP_PIXELS       (MLX_INTERP_W * MLX_INTERP_H)
@@ -29,18 +29,19 @@ extern "C" {
 #define FPS8HZ                  0x04
 #define FPS16HZ                 0x05
 #define FPS32HZ                 0x06
-#define RefreshRate             FPS32HZ 
 
-// 导出图像描述符与 UI 句柄
+// 推荐 16Hz：兼顾信噪比与极速刷新响应
+#define RefreshRate             FPS16HZ 
+
+// 导出图像描述符与 UI 控件句柄
 extern lv_img_dsc_t s_thermal_img_dsc;
 extern lv_obj_t *img_thermal;
+extern lv_obj_t *label_title;
+extern lv_obj_t *label_fps_float;
 extern lv_obj_t *label_info;
-extern lv_obj_t *label_status_left;
-extern lv_obj_t *label_status_right;
-extern lv_obj_t *tag_max; // 最高温动态跟随标签
-extern lv_obj_t *tag_min; // 最低温动态跟随标签
+extern lv_obj_t *tag_max;
+extern lv_obj_t *tag_min;
 
-// 声明关键函数
 esp_err_t ir_camera_app_init(void);
 bool example_lvgl_lock(int timeout_ms);
 void example_lvgl_unlock(void);
