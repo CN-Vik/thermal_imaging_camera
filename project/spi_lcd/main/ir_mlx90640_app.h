@@ -31,7 +31,7 @@ extern "C" {
 #define FPS32HZ                 0x06
 
 // 8Hz 最佳降噪甜点档
-#define RefreshRate             FPS8HZ 
+#define RefreshRate             FPS16HZ 
 
 // 导出底图描述符与半透明 HUD 控件
 extern lv_img_dsc_t s_thermal_img_dsc;
