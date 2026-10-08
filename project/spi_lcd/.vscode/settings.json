@@ -31,7 +31,8 @@
   "clangd.arguments": [
     "--background-index",
     "--query-driver=**",
-    "--compile-commands-dir=c:\\Users\\ufo28\\Desktop\\thermal_imaging_camera\\project\\spi_lcd\\build"
+    "--compile-commands-dir=c:\\Users\\guoxu\\Downloads\\thermal_imaging_camera\\project\\spi_lcd\\build"
 ],
-"idf.flashType": "UART"
+"idf.flashType": "UART",
+"idf.port": "COM6"
 }
