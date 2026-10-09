@@ -20,12 +20,16 @@
 #include "ir_mlx90640_app.h"
 
 #include "esp_lcd_panel_st7789.h"
+#include "driver/gpio.h"
 
 // #if CONFIG_EXAMPLE_LCD_TOUCH_CONTROLLER_STMPE610
 // #include "esp_lcd_touch_stmpe610.h"
 // #endif
 
 static const char *TAG = "thermal imaging_eg";
+
+#define PIN_PWR_HOLD    GPIO_NUM_36  // 电源自锁输出
+#define PIN_KEY_DET     GPIO_NUM_37  // 按键检测输入
 
 // Using SPI2 in the example
 #define LCD_HOST SPI2_HOST
@@ -214,10 +218,44 @@ static void example_lvgl_port_task(void *arg)
     }
 }
 
+
+void power_on(void)
+{
+    // 1. 最优先任务：拉高 IO36，锁定电源！松手不掉电！
+    gpio_config_t hold_cfg = {
+        .pin_bit_mask = (1ULL << PIN_PWR_HOLD),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&hold_cfg);
+    gpio_set_level(PIN_PWR_HOLD, 1);  // 立即输出高电平锁定电源
+
+    // 2. 配置 IO37 为带上拉的输入，用于开机后检测按键
+    gpio_config_t key_cfg = {
+        .pin_bit_mask = (1ULL << PIN_KEY_DET),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&key_cfg);
+
+    // 3. 正常打印 LOG
+    printf("HELLO ESP32-S3\r\n");
+    ESP_LOGI("PWR", "Power successfully latched via IO36!");
+
+    // 测试按键检测：按下按键时 IO37 会变为 0
+    // 如果后续想关机，直接执行：gpio_set_level(PIN_PWR_HOLD, 0); 即可彻底断电
+}
+
 void app_main(void)
 {
     static lv_disp_draw_buf_t disp_buf; // contains internal graphic buffer(s) called draw buffer(s)
     static lv_disp_drv_t disp_drv;      // contains callback functions
+
+    power_on();
 
     ESP_LOGI(TAG, "Turn off LCD backlight");
     gpio_config_t bk_gpio_config = {
