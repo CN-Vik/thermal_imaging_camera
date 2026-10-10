@@ -243,8 +243,8 @@ void power_on(void)
     gpio_config(&key_cfg);
 
     // 3. 正常打印 LOG
-    printf("HELLO ESP32-S3\r\n");
-    ESP_LOGI("PWR", "Power successfully latched via IO36!");
+    ESP_LOGI(TAG,"HELLO_ESP32-S3\r\n");
+    ESP_LOGI(TAG, "Power_successfully_latched_via_IO36!");
 
     // 测试按键检测：按下按键时 IO37 会变为 0
     // 如果后续想关机，直接执行：gpio_set_level(PIN_PWR_HOLD, 0); 即可彻底断电
@@ -257,7 +257,7 @@ void app_main(void)
 
     power_on();
 
-    ESP_LOGI(TAG, "Turn off LCD backlight");
+    ESP_LOGI(TAG, "Turn_off_LCD_backlight");
     gpio_config_t bk_gpio_config = {
         .mode = GPIO_MODE_OUTPUT,
         .pin_bit_mask = 1ULL << EXAMPLE_PIN_NUM_BK_LIGHT
