@@ -34,5 +34,5 @@
     "--compile-commands-dir=c:\\Users\\guoxu\\Downloads\\thermal_imaging_camera\\project\\spi_lcd\\build"
 ],
 "idf.flashType": "UART",
-"idf.port": "COM6"
+"idf.port": "COM32"
 }

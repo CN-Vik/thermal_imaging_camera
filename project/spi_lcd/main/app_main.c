@@ -40,14 +40,23 @@ static const char *TAG = "thermal imaging_eg";
 #define EXAMPLE_LCD_PIXEL_CLOCK_HZ (40 * 1000 * 1000)
 #define EXAMPLE_LCD_BK_LIGHT_ON_LEVEL 1
 #define EXAMPLE_LCD_BK_LIGHT_OFF_LEVEL !EXAMPLE_LCD_BK_LIGHT_ON_LEVEL
-#define EXAMPLE_PIN_NUM_SCLK 12
-#define EXAMPLE_PIN_NUM_MOSI 11
-#define EXAMPLE_PIN_NUM_MISO -1
-#define EXAMPLE_PIN_NUM_LCD_DC 10
-#define EXAMPLE_PIN_NUM_LCD_RST 9
-#define EXAMPLE_PIN_NUM_LCD_CS 8
-#define EXAMPLE_PIN_NUM_BK_LIGHT 18
-#define EXAMPLE_PIN_NUM_TOUCH_CS 15
+
+// 屏幕 SPI 引脚
+#define EXAMPLE_PIN_NUM_SCLK 13        // 原 12 -> 改为 13 (对应原理图 SCL)
+#define EXAMPLE_PIN_NUM_MOSI 12        // 原 11 -> 改为 12 (对应原理图 SDA)
+#define EXAMPLE_PIN_NUM_MISO -1        // 无需 MISO
+#define EXAMPLE_PIN_NUM_LCD_DC 17      // 原 10 -> 改为 17 (对应原理图 D/C#)
+#define EXAMPLE_PIN_NUM_LCD_RST 9      // 保持 9 (对应原理图 RESET)
+#define EXAMPLE_PIN_NUM_LCD_CS 14      // 原 8  -> 改为 14 (对应原理图 CS)
+
+// 背光引脚（原理图 Pin 17 为 LEDK 阴极，通常外接 MOS 管控制）
+#define EXAMPLE_PIN_NUM_BK_LIGHT 18    // 若你的背光控制 GPIO 未变，保持 18
+
+// 触摸屏 I2C 引脚（若后续启用触摸）
+#define EXAMPLE_PIN_NUM_TOUCH_SCL 11   // 对应原理图 TP_SCL
+#define EXAMPLE_PIN_NUM_TOUCH_SDA 10   // 对应原理图 TP_SDA
+#define EXAMPLE_PIN_NUM_TOUCH_RST 9    // 对应原理图 TP-RST (与屏幕共用 IO9)
+#define EXAMPLE_PIN_NUM_TOUCH_INT 8    // 对应原理图 TP_INT
 
 #define EXAMPLE_LCD_H_RES 240
 #define EXAMPLE_LCD_V_RES 280
