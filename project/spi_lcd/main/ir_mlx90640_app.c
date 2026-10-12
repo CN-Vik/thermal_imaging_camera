@@ -85,6 +85,12 @@ esp_err_t ir_camera_app_init(void)
         s_display_buf[1] = s_display_buf[0];
     }
 
+    // 【新增】：将两个显存彻底清零为纯黑，防止开机雪花杂波！
+    memset(s_display_buf[0], 0, buf_size);
+    if (s_display_buf[1] != s_display_buf[0]) {
+        memset(s_display_buf[1], 0, buf_size);
+    }
+
     s_scale_fp = ((MLX_RAW_H - 1) << 16) / (MLX_INTERP_H - 1);
     s_x_start_fp = ((MLX_RAW_W - 1) << 15)
                  - (int32_t)(((MLX_INTERP_W - 1) * s_scale_fp) / 2);
@@ -266,393 +272,235 @@ static void temperature_to_norm_u8(const float *src, uint8_t *dst,
 
 void ir_camera_task_main(void *pvParameters)
 {
-    (void)pvParameters;
+    (void)pvParameters; //[cite: 3]
 
-    ESP_LOGI(TAG, "IR camera task started on Core %d", xPortGetCoreID());
-    ESP_LOGI(TAG, "Thermal map: fixed range %.1fC ~ %.1fC, auto_range=%d",
-             THERMAL_FIXED_MIN_C, THERMAL_FIXED_MAX_C, THERMAL_USE_AUTO_RANGE);
+    ESP_LOGI(TAG, "IR camera task started on Core %d", xPortGetCoreID()); //[cite: 3]
+    ESP_LOGI(TAG, "Thermal map: fixed range %.1fC ~ %.1fC, auto_range=%d", //[cite: 3]
+             THERMAL_FIXED_MIN_C, THERMAL_FIXED_MAX_C, THERMAL_USE_AUTO_RANGE); //[cite: 3]
 
-    init_ironbow_lut();
+    init_ironbow_lut(); //[cite: 3]
 
-    MLX90640_I2CInit();
-    MLX90640_SetRefreshRate(MLX90640_ADDR, RefreshRate);
-    MLX90640_SetChessMode(MLX90640_ADDR);
+    MLX90640_I2CInit(); //[cite: 3]
+    MLX90640_SetRefreshRate(MLX90640_ADDR, RefreshRate); //[cite: 3]
+    MLX90640_SetChessMode(MLX90640_ADDR); //[cite: 3]
 
-    uint16_t *ir_frame_data = (uint16_t *)calloc(834, sizeof(uint16_t));
-    uint16_t *eerom_ir_data = (uint16_t *)calloc(832, sizeof(uint16_t));
-    float *ir_temp_data = (float *)calloc(MLX_RAW_PIXELS, sizeof(float));
-    paramsMLX90640 *mlx_params = (paramsMLX90640 *)calloc(1, sizeof(paramsMLX90640));
+    uint16_t *ir_frame_data = (uint16_t *)calloc(834, sizeof(uint16_t)); //[cite: 3]
+    uint16_t *eerom_ir_data = (uint16_t *)calloc(832, sizeof(uint16_t)); //[cite: 3]
+    float *raw_temp_matrix  = (float *)calloc(MLX_RAW_PIXELS, sizeof(float)); // 单一真实矩阵，由官方增量覆盖
+    paramsMLX90640 *mlx_params = (paramsMLX90640 *)calloc(1, sizeof(paramsMLX90640)); //[cite: 3]
 
-    /* Two true subpage buffers.  A displayed frame is built only after both
-     * subpages have been received, instead of mixing a new half-frame with
-     * an older half-frame on every I2C read. */
-    float *subpage_temp[2] = {
-        (float *)calloc(MLX_RAW_PIXELS, sizeof(float)),
-        (float *)calloc(MLX_RAW_PIXELS, sizeof(float))
-    };
+    float *filtered_temp = (float *)calloc(MLX_RAW_PIXELS, sizeof(float)); //[cite: 3]
+    float *spatial_temp  = (float *)calloc(MLX_RAW_PIXELS, sizeof(float)); //[cite: 3]
+    uint8_t *norm_matrix = (uint8_t *)calloc(MLX_RAW_PIXELS, sizeof(uint8_t)); //[cite: 3]
 
-    float *raw_full_matrix = (float *)calloc(MLX_RAW_PIXELS, sizeof(float));
-    float *filtered_temp = (float *)calloc(MLX_RAW_PIXELS, sizeof(float));
-    float *spatial_temp = (float *)calloc(MLX_RAW_PIXELS, sizeof(float));
-    uint8_t *norm_matrix = (uint8_t *)calloc(MLX_RAW_PIXELS, sizeof(uint8_t));
-
-    if (!ir_frame_data || !eerom_ir_data || !ir_temp_data || !mlx_params ||
-        !subpage_temp[0] || !subpage_temp[1] || !raw_full_matrix ||
+    if (!ir_frame_data || !eerom_ir_data || !raw_temp_matrix || !mlx_params ||
         !filtered_temp || !spatial_temp || !norm_matrix) {
-        ESP_LOGE(TAG, "Critical: calloc failed, Out of memory!");
-        free(ir_frame_data);
-        free(eerom_ir_data);
-        free(ir_temp_data);
-        free(mlx_params);
-        free(subpage_temp[0]);
-        free(subpage_temp[1]);
-        free(raw_full_matrix);
-        free(filtered_temp);
-        free(spatial_temp);
-        free(norm_matrix);
-        vTaskDelete(NULL);
-        return;
+        ESP_LOGE(TAG, "Critical: calloc failed, Out of memory!"); //[cite: 3]
+        vTaskDelete(NULL); //[cite: 3]
+        return; //[cite: 3]
     }
 
-    MLX90640_DumpEE(MLX90640_ADDR, eerom_ir_data);
-    MLX90640_ExtractParameters(eerom_ir_data, mlx_params);
-    free(eerom_ir_data);
-    eerom_ir_data = NULL;
+    MLX90640_DumpEE(MLX90640_ADDR, eerom_ir_data); //[cite: 3]
+    MLX90640_ExtractParameters(eerom_ir_data, mlx_params); //[cite: 3]
+    free(eerom_ir_data); //[cite: 3]
+    eerom_ir_data = NULL; //[cite: 3]
 
-    char text_info[96];
-    char text_fps[32];
-    char text_max_tag[16];
-    char text_min_tag[16];
+    // 【关键优化 1】：开机丢弃前 4 帧哑数据，等待传感器内部硬件 PTAT 和 VDD 稳定
+    ESP_LOGI(TAG, "Warming up MLX90640 sensor...");
+    for (int i = 0; i < 4; i++) {
+        MLX90640_GetFrameData(MLX90640_ADDR, ir_frame_data); //[cite: 3]
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
 
-    uint32_t frame_count = 0;
-    float real_fps = 0.0f;
-    int64_t last_time_us = esp_timer_get_time();
+    char text_info[96]; //[cite: 3]
+    char text_fps[32]; //[cite: 3]
+    char text_max_tag[16]; //[cite: 3]
+    char text_min_tag[16]; //[cite: 3]
 
-    float smooth_min_t = THERMAL_FIXED_MIN_C;
-    float smooth_max_t = THERMAL_FIXED_MAX_C;
-    bool range_initialized = false;
+    uint32_t frame_count = 0; //[cite: 3]
+    float real_fps = 0.0f; //[cite: 3]
+    int64_t last_time_us = esp_timer_get_time(); //[cite: 3]
 
-    bool subpage_ready[2] = {false, false};
+    float smooth_min_t = THERMAL_FIXED_MIN_C; //[cite: 3]
+    float smooth_max_t = THERMAL_FIXED_MAX_C; //[cite: 3]
+    bool range_initialized = false; //[cite: 3]
+
+    // 记录两个子场是否各自都完成过至少一次测量
+    bool subpage_init[2] = {false, false};
 
     while (1) {
-        int status = MLX90640_GetFrameData(MLX90640_ADDR, ir_frame_data);
+        int status = MLX90640_GetFrameData(MLX90640_ADDR, ir_frame_data); //[cite: 3]
 
         if (status >= 0) {
-            int subpage = ir_frame_data[833];
+            int subpage = ir_frame_data[833]; //[cite: 3]
+            if (subpage < 0 || subpage > 1) { //[cite: 3]
+                vTaskDelay(pdMS_TO_TICKS(2)); //[cite: 3]
+                continue; //[cite: 3]
+            }
 
-            if (subpage < 0 || subpage > 1) {
+            float ta = MLX90640_GetTa(ir_frame_data, mlx_params); //[cite: 3]
+
+            // 1. 官方原生计算：每次只增量更新当前 subpage 的 384 个点，另一半保留上一帧的真实点
+            MLX90640_CalculateTo(ir_frame_data, mlx_params,
+                                 emissivity, ta - TA_SHIFT, raw_temp_matrix); //[cite: 3]
+
+            // 【关键优化 2】：调用官方坏点校准算法（必须执行！）
+            int mode = (ir_frame_data[832] & MLX90640_CTRL_MEAS_MODE_MASK) >> 5; //[cite: 3]
+            MLX90640_BadPixelsCorrection(mlx_params->brokenPixels, raw_temp_matrix, mode, mlx_params);
+            MLX90640_BadPixelsCorrection(mlx_params->outlierPixels, raw_temp_matrix, mode, mlx_params);
+
+            subpage_init[subpage] = true;
+            frame_count++; //[cite: 3]
+
+            // 开机首轮：必须等 0 和 1 两个场全部采过一遍（确保 768 个点都有初始测量值）才送显
+            if (!subpage_init[0] || !subpage_init[1]) {
                 vTaskDelay(pdMS_TO_TICKS(2));
                 continue;
             }
 
-            float ta = MLX90640_GetTa(ir_frame_data, mlx_params);
-            MLX90640_CalculateTo(ir_frame_data, mlx_params,
-                                 emissivity, ta - TA_SHIFT, ir_temp_data);
-            frame_count++;
+            // 2. 棋盘格 Subpage 微弱失配滤波抑制（消除残余条纹）
+            for (int r = 0; r < MLX_RAW_H; r++) { //[cite: 3]
+                for (int c = 0; c < MLX_RAW_W; c++) { //[cite: 3]
+                    int idx = r * MLX_RAW_W + c; //[cite: 3]
+                    float sum = 0.0f; //[cite: 3]
+                    int count = 0; //[cite: 3]
 
-            /* ------------------------------------------------------------
-             * 1. Save only the currently refreshed physical subpage.
-             * ------------------------------------------------------------ */
-            for (int i = 0; i < MLX_RAW_PIXELS; i++) {
-                int r = i / MLX_RAW_W;
-                int c = i % MLX_RAW_W;
+                    if (r > 0)             { sum += raw_temp_matrix[(r - 1) * MLX_RAW_W + c]; count++; } //[cite: 3]
+                    if (r < MLX_RAW_H - 1) { sum += raw_temp_matrix[(r + 1) * MLX_RAW_W + c]; count++; } //[cite: 3]
+                    if (c > 0)             { sum += raw_temp_matrix[r * MLX_RAW_W + (c - 1)]; count++; } //[cite: 3]
+                    if (c < MLX_RAW_W - 1) { sum += raw_temp_matrix[r * MLX_RAW_W + (c + 1)]; count++; } //[cite: 3]
 
-                if (((r + c) & 1) == subpage) {
-                    float t = ir_temp_data[i];
-                    if (t > 0.0f && t < 300.0f && isfinite(t)) {
-                        subpage_temp[subpage][i] = t;
-                    }
-                }
-            }
-
-            subpage_ready[subpage] = true;
-
-            /* Do not process/display a frame until both subpages are fresh. */
-            if (!(subpage_ready[0] && subpage_ready[1])) {
-                vTaskDelay(pdMS_TO_TICKS(1));
-                continue;
-            }
-
-            /* ------------------------------------------------------------
-             * 2. Assemble a truly complete 32x24 frame from two fresh
-             *    subpages. No more "current subpage + previous frame"
-             *    blending here.
-             * ------------------------------------------------------------ */
-            for (int r = 0; r < MLX_RAW_H; r++) {
-                for (int c = 0; c < MLX_RAW_W; c++) {
-                    int idx = r * MLX_RAW_W + c;
-                    int page = (r + c) & 1;
-                    raw_full_matrix[idx] = subpage_temp[page][idx];
-                }
-            }
-
-            /* The two subpages have now both contributed to one complete
-             * displayed frame. The next display frame must receive a fresh
-             * sample from both pages again. */
-            subpage_ready[0] = false;
-            subpage_ready[1] = false;
-
-            /* ------------------------------------------------------------
-             * 3. Mild checkerboard mismatch suppression.
-             *    Keep this conservative; its job is only to suppress a
-             *    subpage boundary outlier, not to blur real hot spots.
-             * ------------------------------------------------------------ */
-            for (int r = 0; r < MLX_RAW_H; r++) {
-                for (int c = 0; c < MLX_RAW_W; c++) {
-                    int idx = r * MLX_RAW_W + c;
-                    float sum = 0.0f;
-                    int count = 0;
-
-                    if (r > 0) {
-                        sum += raw_full_matrix[(r - 1) * MLX_RAW_W + c];
-                        count++;
-                    }
-                    if (r < MLX_RAW_H - 1) {
-                        sum += raw_full_matrix[(r + 1) * MLX_RAW_W + c];
-                        count++;
-                    }
-                    if (c > 0) {
-                        sum += raw_full_matrix[r * MLX_RAW_W + (c - 1)];
-                        count++;
-                    }
-                    if (c < MLX_RAW_W - 1) {
-                        sum += raw_full_matrix[r * MLX_RAW_W + (c + 1)];
-                        count++;
-                    }
-
-                    if (count > 0) {
-                        float avg = sum / (float)count;
-                        float diff = fabsf(raw_full_matrix[idx] - avg);
-
-                        if (diff > 1.0f) {
-                            float blend = (diff - 1.0f) / 2.0f;
-                            if (blend > 0.50f) blend = 0.50f;
-                            raw_full_matrix[idx] =
-                                (1.0f - blend) * raw_full_matrix[idx]
-                                + blend * avg;
+                    if (count > 0) { //[cite: 3]
+                        float avg = sum / (float)count; //[cite: 3]
+                        float diff = fabsf(raw_temp_matrix[idx] - avg); //[cite: 3]
+                        if (diff > 0.8f) {
+                            float blend = (diff - 0.8f) / 2.0f;
+                            if (blend > 0.40f) blend = 0.40f;
+                            raw_temp_matrix[idx] = (1.0f - blend) * raw_temp_matrix[idx] + blend * avg; //[cite: 3]
                         }
                     }
                 }
             }
 
-            /* ------------------------------------------------------------
-             * 4. Temporal filtering.
-             *    - Tiny changes: strong smoothing.
-             *    - Medium changes: moderate response.
-             *    - Large changes: fast response.
-             * ------------------------------------------------------------ */
-            for (int i = 0; i < MLX_RAW_PIXELS; i++) {
-                if (filtered_temp[i] < 1.0f || !isfinite(filtered_temp[i])) {
-                    filtered_temp[i] = raw_full_matrix[i];
-                    continue;
+            // 3. 时域响应平滑
+            for (int i = 0; i < MLX_RAW_PIXELS; i++) { //[cite: 3]
+                if (filtered_temp[i] < 1.0f || !isfinite(filtered_temp[i])) { //[cite: 3]
+                    filtered_temp[i] = raw_temp_matrix[i]; //[cite: 3]
+                    continue; //[cite: 3]
                 }
-
-                float d = fabsf(raw_full_matrix[i] - filtered_temp[i]);
-                float alpha;
-
-                if (d > TEMP_FILTER_LARGE_THRESHOLD) {
-                    alpha = TEMP_FILTER_ALPHA_LARGE;
-                } else if (d > TEMP_FILTER_MEDIUM_THRESHOLD) {
-                    alpha = TEMP_FILTER_ALPHA_MEDIUM;
+                float d = fabsf(raw_temp_matrix[i] - filtered_temp[i]); //[cite: 3]
+                float alpha; //[cite: 3]
+                if (d > TEMP_FILTER_LARGE_THRESHOLD) { //[cite: 3]
+                    alpha = TEMP_FILTER_ALPHA_LARGE; //[cite: 3]
+                } else if (d > TEMP_FILTER_MEDIUM_THRESHOLD) { //[cite: 3]
+                    alpha = TEMP_FILTER_ALPHA_MEDIUM; //[cite: 3]
                 } else {
-                    alpha = TEMP_FILTER_ALPHA_SMALL;
+                    alpha = TEMP_FILTER_ALPHA_SMALL; //[cite: 3]
                 }
-
-                filtered_temp[i] =
-                    alpha * raw_full_matrix[i]
-                    + (1.0f - alpha) * filtered_temp[i];
+                filtered_temp[i] = alpha * raw_temp_matrix[i] + (1.0f - alpha) * filtered_temp[i]; //[cite: 3]
             }
 
-            /* ------------------------------------------------------------
-             * 5. Mild spatial denoise.
-             * ------------------------------------------------------------ */
-            spatial_filter_natural(filtered_temp, spatial_temp,
-                                   MLX_RAW_W, MLX_RAW_H);
+            // 4. 自然空间降噪
+            spatial_filter_natural(filtered_temp, spatial_temp, MLX_RAW_W, MLX_RAW_H); //[cite: 3]
 
-            /* ------------------------------------------------------------
-             * 6. Statistics for HUD / markers only.
-             *    These values DO NOT control the color mapping in the
-             *    default fixed-range mode.
-             * ------------------------------------------------------------ */
-            float cur_min = 200.0f;
-            float cur_max = -50.0f;
-            int max_idx = 0;
-            int min_idx = 0;
-            int valid_pts = 0;
+            // 5. 统计极值
+            float cur_min = 200.0f; //[cite: 3]
+            float cur_max = -50.0f; //[cite: 3]
+            int max_idx = 0; //[cite: 3]
+            int min_idx = 0; //[cite: 3]
+            int valid_pts = 0; //[cite: 3]
 
-            for (int i = 0; i < MLX_RAW_PIXELS; i++) {
-                float val = spatial_temp[i];
-
-                if (val > 1.0f && val < 200.0f && isfinite(val)) {
-                    if (val < cur_min) {
-                        cur_min = val;
-                        min_idx = i;
-                    }
-                    if (val > cur_max) {
-                        cur_max = val;
-                        max_idx = i;
-                    }
-                    valid_pts++;
+            for (int i = 0; i < MLX_RAW_PIXELS; i++) { //[cite: 3]
+                float val = spatial_temp[i]; //[cite: 3]
+                if (val > 1.0f && val < 200.0f && isfinite(val)) { //[cite: 3]
+                    if (val < cur_min) { cur_min = val; min_idx = i; } //[cite: 3]
+                    if (val > cur_max) { cur_max = val; max_idx = i; } //[cite: 3]
+                    valid_pts++; //[cite: 3]
                 }
             }
 
-            if (valid_pts <= 0) {
-                vTaskDelay(pdMS_TO_TICKS(2));
-                continue;
+            if (valid_pts <= 0) { //[cite: 3]
+                vTaskDelay(pdMS_TO_TICKS(2)); //[cite: 3]
+                continue; //[cite: 3]
             }
 
-            /* ------------------------------------------------------------
-             * 7. FPS
-             * ------------------------------------------------------------ */
-            int64_t now_us = esp_timer_get_time();
-            int64_t diff_us = now_us - last_time_us;
-
-            if (diff_us >= 1000000) {
-                real_fps = (float)frame_count * 1000000.0f / (float)diff_us;
-                frame_count = 0;
-                last_time_us = now_us;
+            // 6. 帧率统计与 HUD 字符串格式化
+            int64_t now_us = esp_timer_get_time(); //[cite: 3]
+            int64_t diff_us = now_us - last_time_us; //[cite: 3]
+            if (diff_us >= 1000000) { //[cite: 3]
+                real_fps = (float)frame_count * 1000000.0f / (float)diff_us; //[cite: 3]
+                frame_count = 0; //[cite: 3]
+                last_time_us = now_us; //[cite: 3]
             }
 
-            float center_t = spatial_temp[12 * MLX_RAW_W + 16];
+            float center_t = spatial_temp[12 * MLX_RAW_W + 16]; //[cite: 3]
+            snprintf(text_fps, sizeof(text_fps), "%.1f FPS", real_fps); //[cite: 3]
+            snprintf(text_info, sizeof(text_info), //[cite: 3]
+                     "MAX: %.1f C    MIN: %.1f C\nCEN: %.1f C    DT: %.1f C", //[cite: 3]
+                     cur_max, cur_min, center_t, (cur_max - cur_min)); //[cite: 3]
+            snprintf(text_max_tag, sizeof(text_max_tag), "MAX %.1f", cur_max); //[cite: 3]
+            snprintf(text_min_tag, sizeof(text_min_tag), "MIN %.1f", cur_min); //[cite: 3]
 
-            snprintf(text_fps, sizeof(text_fps), "%.1f FPS", real_fps);
-            snprintf(text_info, sizeof(text_info),
-                     "MAX: %.1f C    MIN: %.1f C\nCEN: %.1f C    DT: %.1f C",
-                     cur_max, cur_min, center_t, (cur_max - cur_min));
-            snprintf(text_max_tag, sizeof(text_max_tag), "MAX %.1f", cur_max);
-            snprintf(text_min_tag, sizeof(text_min_tag), "MIN %.1f", cur_min);
+            // 7. 映射并进行双线性插值送显
+            if (valid_pts > 400) { //[cite: 3]
+                temperature_to_norm_u8(spatial_temp, norm_matrix, smooth_min_t, smooth_max_t); //[cite: 3]
+                uint16_t *cur_write_buf = s_display_buf[s_back_idx]; //[cite: 3]
 
-            /* ------------------------------------------------------------
-             * 8. Optional slow auto-range.
-             *    Disabled by default because fixed-range rendering is much
-             *    more stable for a static indoor scene.
-             * ------------------------------------------------------------ */
-#if THERMAL_USE_AUTO_RANGE
-            float target_min = cur_min - AUTO_RANGE_PADDING_C;
-            float target_max = cur_max + AUTO_RANGE_PADDING_C;
+                bilinear_scale_fullscreen_1to1( //[cite: 3]
+                    norm_matrix, MLX_RAW_W, MLX_RAW_H, //[cite: 3]
+                    cur_write_buf, MLX_INTERP_W, MLX_INTERP_H, //[cite: 3]
+                    s_ironbow_lut); //[cite: 3]
 
-            float target_span = target_max - target_min;
-            if (target_span < AUTO_RANGE_MIN_SPAN_C) {
-                float center = 0.5f * (target_min + target_max);
-                target_min = center - 0.5f * AUTO_RANGE_MIN_SPAN_C;
-                target_max = center + 0.5f * AUTO_RANGE_MIN_SPAN_C;
-            }
+                // 计算准星位置并绘制标记
+                int max_raw_r = max_idx / MLX_RAW_W; //[cite: 3]
+                int max_raw_c = max_idx % MLX_RAW_W; //[cite: 3]
+                int max_px_y = (max_raw_r * (MLX_INTERP_H - 1)) / (MLX_RAW_H - 1); //[cite: 3]
+                int max_px_x = (int)(((max_raw_c << 16) - s_x_start_fp) / s_scale_fp); //[cite: 3]
+                if (max_px_x < 0) max_px_x = 0; //[cite: 3]
+                if (max_px_x >= MLX_INTERP_W) max_px_x = MLX_INTERP_W - 1; //[cite: 3]
 
-            if (!range_initialized) {
-                smooth_min_t = target_min;
-                smooth_max_t = target_max;
-                range_initialized = true;
-            } else {
-                smooth_min_t += AUTO_RANGE_ALPHA * (target_min - smooth_min_t);
-                smooth_max_t += AUTO_RANGE_ALPHA * (target_max - smooth_max_t);
-            }
-#endif
+                int min_raw_r = min_idx / MLX_RAW_W; //[cite: 3]
+                int min_raw_c = min_idx % MLX_RAW_W; //[cite: 3]
+                int min_px_y = (min_raw_r * (MLX_INTERP_H - 1)) / (MLX_RAW_H - 1); //[cite: 3]
+                int min_px_x = (int)(((min_raw_c << 16) - s_x_start_fp) / s_scale_fp); //[cite: 3]
+                if (min_px_x < 0) min_px_x = 0; //[cite: 3]
+                if (min_px_x >= MLX_INTERP_W) min_px_x = MLX_INTERP_W - 1; //[cite: 3]
 
-            if (valid_pts > 400) {
-                /* --------------------------------------------------------
-                 * 9. Temperature -> 0..255 mapping.
-                 * -------------------------------------------------------- */
-                temperature_to_norm_u8(spatial_temp, norm_matrix,
-                                       smooth_min_t, smooth_max_t);
+                draw_diamond_marker(cur_write_buf, max_px_x, max_px_y, MLX_INTERP_W, MLX_INTERP_H, 5, 0xF800); //[cite: 3]
+                draw_diamond_marker(cur_write_buf, min_px_x, min_px_y, MLX_INTERP_W, MLX_INTERP_H, 5, 0x07FF); //[cite: 3]
+                draw_diamond_marker(cur_write_buf, MLX_INTERP_W / 2, MLX_INTERP_H / 2, MLX_INTERP_W, MLX_INTERP_H, 3, 0xFFFF); //[cite: 3]
 
-                uint16_t *cur_write_buf = s_display_buf[s_back_idx];
+                // 8. 刷新到 LVGL 显存
+                if (example_lvgl_lock(100)) { //[cite: 3]
+                    s_thermal_img_dsc.data = (const uint8_t *)cur_write_buf; //[cite: 3]
+                    if (img_thermal) { //[cite: 3]
+                        lv_img_set_src(img_thermal, &s_thermal_img_dsc); //[cite: 3]
+                        lv_obj_invalidate(img_thermal); //[cite: 3]
+                    }
+                    if (label_fps_float) lv_label_set_text(label_fps_float, text_fps); //[cite: 3]
+                    if (label_info) lv_label_set_text(label_info, text_info); //[cite: 3]
 
-                /* --------------------------------------------------------
-                 * 10. 32x24 -> 240x280 bilinear scaling and color LUT.
-                 * -------------------------------------------------------- */
-                bilinear_scale_fullscreen_1to1(
-                    norm_matrix,
-                    MLX_RAW_W,
-                    MLX_RAW_H,
-                    cur_write_buf,
-                    MLX_INTERP_W,
-                    MLX_INTERP_H,
-                    s_ironbow_lut);
-
-                /* --------------------------------------------------------
-                 * 11. Markers.
-                 * -------------------------------------------------------- */
-                int max_raw_r = max_idx / MLX_RAW_W;
-                int max_raw_c = max_idx % MLX_RAW_W;
-                int max_px_y = (max_raw_r * (MLX_INTERP_H - 1)) / (MLX_RAW_H - 1);
-                int max_px_x = (int)(((max_raw_c << 16) - s_x_start_fp) / s_scale_fp);
-
-                if (max_px_x < 0) max_px_x = 0;
-                if (max_px_x >= MLX_INTERP_W) max_px_x = MLX_INTERP_W - 1;
-
-                int min_raw_r = min_idx / MLX_RAW_W;
-                int min_raw_c = min_idx % MLX_RAW_W;
-                int min_px_y = (min_raw_r * (MLX_INTERP_H - 1)) / (MLX_RAW_H - 1);
-                int min_px_x = (int)(((min_raw_c << 16) - s_x_start_fp) / s_scale_fp);
-
-                if (min_px_x < 0) min_px_x = 0;
-                if (min_px_x >= MLX_INTERP_W) min_px_x = MLX_INTERP_W - 1;
-
-                draw_diamond_marker(cur_write_buf, max_px_x, max_px_y,
-                                    MLX_INTERP_W, MLX_INTERP_H, 5, 0xF800);
-                draw_diamond_marker(cur_write_buf, min_px_x, min_px_y,
-                                    MLX_INTERP_W, MLX_INTERP_H, 5, 0x07FF);
-                draw_diamond_marker(cur_write_buf,
-                                    MLX_INTERP_W / 2,
-                                    MLX_INTERP_H / 2,
-                                    MLX_INTERP_W,
-                                    MLX_INTERP_H,
-                                    3,
-                                    0xFFFF);
-
-                /* --------------------------------------------------------
-                 * 12. LVGL update.
-                 * -------------------------------------------------------- */
-                if (example_lvgl_lock(100)) {
-                    s_thermal_img_dsc.data = (const uint8_t *)cur_write_buf;
-
-                    if (img_thermal) {
-                        lv_img_set_src(img_thermal, &s_thermal_img_dsc);
-                        lv_obj_invalidate(img_thermal);
+                    if (tag_max) { //[cite: 3]
+                        int pos_x = (max_px_x > 175) ? (max_px_x - 58) : (max_px_x + 8); //[cite: 3]
+                        int pos_y = (max_px_y < 45) ? (max_px_y + 10) : ((max_px_y > 215) ? (max_px_y - 18) : (max_px_y - 8)); //[cite: 3]
+                        lv_label_set_text(tag_max, text_max_tag); //[cite: 3]
+                        lv_obj_set_pos(tag_max, pos_x, pos_y); //[cite: 3]
+                    }
+                    if (tag_min) { //[cite: 3]
+                        int pos_x = (min_px_x > 175) ? (min_px_x - 58) : (min_px_x + 8); //[cite: 3]
+                        int pos_y = (min_px_y < 45) ? (min_px_y + 10) : ((min_px_y > 215) ? (min_px_y - 18) : (min_px_y - 8)); //[cite: 3]
+                        lv_label_set_text(tag_min, text_min_tag); //[cite: 3]
+                        lv_obj_set_pos(tag_min, pos_x, pos_y); //[cite: 3]
                     }
 
-                    if (label_fps_float) {
-                        lv_label_set_text(label_fps_float, text_fps);
+                    if (s_display_buf[0] != s_display_buf[1]) { //[cite: 3]
+                        s_back_idx = 1U - s_back_idx; //[cite: 3]
                     }
-
-                    if (label_info) {
-                        lv_label_set_text(label_info, text_info);
-                    }
-
-                    if (tag_max) {
-                        int pos_x = (max_px_x > 175) ? (max_px_x - 58) : (max_px_x + 8);
-                        int pos_y = (max_px_y < 45)
-                                  ? (max_px_y + 10)
-                                  : ((max_px_y > 215) ? (max_px_y - 18) : (max_px_y - 8));
-                        lv_label_set_text(tag_max, text_max_tag);
-                        lv_obj_set_pos(tag_max, pos_x, pos_y);
-                    }
-
-                    if (tag_min) {
-                        int pos_x = (min_px_x > 175) ? (min_px_x - 58) : (min_px_x + 8);
-                        int pos_y = (min_px_y < 45)
-                                  ? (min_px_y + 10)
-                                  : ((min_px_y > 215) ? (min_px_y - 18) : (min_px_y - 8));
-                        lv_label_set_text(tag_min, text_min_tag);
-                        lv_obj_set_pos(tag_min, pos_x, pos_y);
-                    }
-
-                    if (s_display_buf[0] != s_display_buf[1]) {
-                        s_back_idx = 1U - s_back_idx;
-                    }
-
-                    example_lvgl_unlock();
+                    example_lvgl_unlock(); //[cite: 3]
                 }
             }
         }
 
-        /* MLX90640 is configured for 16Hz in ir_mlx90640_app.h.
-         * A short task delay avoids hammering I2C while keeping the response
-         * fast enough for a thermal display. */
-        if (status >= 0) {
-            vTaskDelay(pdMS_TO_TICKS(2));
-        } else {
-            vTaskDelay(pdMS_TO_TICKS(10));
-        }
+        vTaskDelay(pdMS_TO_TICKS(status >= 0 ? 2 : 10)); //[cite: 3]
     }
 }
