@@ -18,7 +18,8 @@
 #include "esp_log.h"
 #include "lvgl.h"
 #include "ir_mlx90640_app.h"
-
+#include "esp_lcd_touch_cst816s.h"
+#include "driver/i2c_master.h"
 #include "esp_lcd_panel_st7789.h"
 #include "driver/gpio.h"
 
@@ -27,6 +28,8 @@
 // #endif
 
 static const char *TAG = "thermal imaging_eg";
+
+#define CONFIG_EXAMPLE_LCD_TOUCH_ENABLED    1
 
 #define PIN_PWR_HOLD    GPIO_NUM_36  // 电源自锁输出
 #define PIN_KEY_DET     GPIO_NUM_37  // 按键检测输入
@@ -75,7 +78,51 @@ static const char *TAG = "thermal imaging_eg";
 static SemaphoreHandle_t lvgl_mux = NULL;
 
 #if CONFIG_EXAMPLE_LCD_TOUCH_ENABLED
+
 esp_lcd_touch_handle_t tp = NULL;
+#define TOUCH_I2C_PORT    I2C_NUM_1
+
+static esp_err_t app_touch_init(void)
+{
+    // 1. 初始化独立的 I2C_NUM_1 总线 (用于触摸 CST816)
+    i2c_master_bus_config_t bus_config = {
+        .i2c_port = TOUCH_I2C_PORT,              // 独立使用 I2C_NUM_1
+        .sda_io_num = EXAMPLE_PIN_NUM_TOUCH_SDA, // IO10
+        .scl_io_num = EXAMPLE_PIN_NUM_TOUCH_SCL, // IO11
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt = 7,
+        .flags.enable_internal_pullup = true,
+    };
+    i2c_master_bus_handle_t tp_i2c_bus = NULL;
+    ESP_ERROR_CHECK(i2c_new_master_bus(&bus_config, &tp_i2c_bus));
+
+    // 2. 创建 Touch Panel IO (传入新驱动的 bus 句柄)
+    esp_lcd_panel_io_handle_t tp_io_handle = NULL;
+    esp_lcd_panel_io_i2c_config_t tp_io_config = ESP_LCD_TOUCH_IO_I2C_CST816S_CONFIG();
+    ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c(tp_i2c_bus, &tp_io_config, &tp_io_handle));
+
+    // 3. 配置 CST816 驱动
+    esp_lcd_touch_config_t tp_cfg = {
+        .x_max = EXAMPLE_LCD_H_RES,            // 240
+        .y_max = EXAMPLE_LCD_V_RES,            // 280
+        .rst_gpio_num = -1,                    // 共用屏幕复位 IO9，填 -1 防止冲刷屏幕
+        .int_gpio_num = EXAMPLE_PIN_NUM_TOUCH_INT, // IO8
+        .levels = {
+            .reset = 0,
+            .interrupt = 0,
+        },
+        .flags = {
+            .swap_xy = 0,
+            .mirror_x = 0,
+            .mirror_y = 0,
+        },
+    };
+
+    ESP_LOGI(TAG, "Initialize CST816 touch driver on I2C_NUM_1");
+    return esp_lcd_touch_new_i2c_cst816s(tp_io_handle, &tp_cfg, &tp);
+}
+
+
 #endif
 
 extern TaskHandle_t ir_task_Handle;
@@ -121,9 +168,13 @@ static void example_lvgl_port_update_callback(lv_disp_drv_t *drv)
         esp_lcd_panel_swap_xy(panel_handle, true);
         esp_lcd_panel_mirror(panel_handle, true, true);
 #if CONFIG_EXAMPLE_LCD_TOUCH_ENABLED
-        // Rotate LCD touch
-        esp_lcd_touch_set_mirror_y(tp, false);
-        esp_lcd_touch_set_mirror_x(tp, false);
+        if (tp)
+        {
+            // Rotate LCD touch
+            esp_lcd_touch_set_mirror_y(tp, false);
+            esp_lcd_touch_set_mirror_x(tp, false);
+        }
+        
 #endif
         break;
     case LV_DISP_ROT_180:
@@ -157,16 +208,25 @@ static void example_lvgl_touch_cb(lv_indev_drv_t *drv, lv_indev_data_t *data)
     uint8_t touchpad_cnt = 0;
 
     /* Read touch controller data */
+    /* 读取 CST816 触摸数据 */
     esp_lcd_touch_read_data(drv->user_data);
 
     /* Get coordinates */
+    /* 获取触控坐标 */
     bool touchpad_pressed = esp_lcd_touch_get_coordinates(drv->user_data, touchpad_x, touchpad_y, NULL, &touchpad_cnt, 1);
 
     if (touchpad_pressed && touchpad_cnt > 0)
     {
         data->point.x = touchpad_x[0];
-        data->point.y = touchpad_y[0];
+        // 扣除屏幕控制器的 20px GAP 偏移（根据实际点按校准）
+        int16_t y = touchpad_y[0] - 20;
+        data->point.y = (y < 0) ? 0 : y;
+        // data->point.y = touchpad_y[0];
         data->state = LV_INDEV_STATE_PRESSED;
+    
+        // 临时测试打印
+        ESP_LOGI(TAG, "Touch_raw:[%d, %d]->mapped:[%d, %d]", 
+             touchpad_x[0], touchpad_y[0], data->point.x, data->point.y);
     }
     else
     {
@@ -379,7 +439,20 @@ void app_main(void)
     disp_drv.drv_update_cb = example_lvgl_port_update_callback;
     disp_drv.draw_buf = &disp_buf;
     disp_drv.user_data = panel_handle;
+    // 注册显示设备
     lv_disp_t *disp = lv_disp_drv_register(&disp_drv);
+
+    // --- 初始化触控并接入 LVGL ---
+    ESP_ERROR_CHECK(app_touch_init());
+
+    static lv_indev_drv_t indev_drv;
+    lv_indev_drv_init(&indev_drv);
+    indev_drv.type = LV_INDEV_TYPE_POINTER;
+    indev_drv.disp = disp;
+    indev_drv.read_cb = example_lvgl_touch_cb;
+    indev_drv.user_data = tp;
+    lv_indev_drv_register(&indev_drv);
+    // ----------------------------
 
     ESP_LOGI(TAG, "Install LVGL tick timer");
     // Tick interface for LVGL (using esp_timer to generate 2ms periodic event)
@@ -392,7 +465,7 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_timer_start_periodic(lvgl_tick_timer, EXAMPLE_LVGL_TICK_PERIOD_MS * 1000));
 
 #if CONFIG_EXAMPLE_LCD_TOUCH_ENABLED
-    static lv_indev_drv_t indev_drv; // Input device driver (Touch)
+    // static lv_indev_drv_t indev_drv; // Input device driver (Touch)
     lv_indev_drv_init(&indev_drv);
     indev_drv.type = LV_INDEV_TYPE_POINTER;
     indev_drv.disp = disp;

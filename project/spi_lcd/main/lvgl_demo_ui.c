@@ -8,6 +8,34 @@ lv_obj_t *label_info = NULL;
 lv_obj_t *tag_max = NULL;
 lv_obj_t *tag_min = NULL;
 
+static lv_obj_t *touch_cursor = NULL;
+static lv_obj_t *touch_label  = NULL;
+
+static void screen_touch_event_cb(lv_event_t *e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    lv_indev_t *indev = lv_indev_get_act();
+    if (!indev) return;
+
+    if (code == LV_EVENT_PRESSED || code == LV_EVENT_PRESSING) {
+        lv_point_t p;
+        lv_indev_get_point(indev, &p);
+
+        // 圆形准星中心对齐手指触点
+        lv_obj_set_pos(touch_cursor, p.x - 15, p.y - 15);
+        lv_obj_clear_flag(touch_cursor, LV_OBJ_FLAG_HIDDEN);
+
+        // 浮动坐标文字显示在手指斜上方
+        lv_label_set_text_fmt(touch_label, "X:%d Y:%d", p.x, p.y);
+        lv_obj_set_pos(touch_label, (p.x > 50) ? (p.x - 30) : 5, (p.y > 30) ? (p.y - 25) : 5);
+        lv_obj_clear_flag(touch_label, LV_OBJ_FLAG_HIDDEN);
+    } 
+    else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+        lv_obj_add_flag(touch_cursor, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(touch_label, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
 void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
 {
     lv_obj_t *scr = lv_disp_get_scr_act(disp);
@@ -114,4 +142,30 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
     lv_obj_set_style_text_align(label_info, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(label_info, LV_ALIGN_CENTER, 0, 0);
     lv_label_set_text(label_info, "Calibrating Sensor...");
+
+    // 允许事件穿透热成像底图
+    lv_obj_clear_flag(img_thermal, LV_OBJ_FLAG_CLICKABLE);
+
+    // 1. 创建青色高亮圆环光标 (直径 30px)
+    touch_cursor = lv_obj_create(scr);
+    lv_obj_remove_style_all(touch_cursor);
+    lv_obj_set_size(touch_cursor, 30, 30);
+    lv_obj_set_style_radius(touch_cursor, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_border_width(touch_cursor, 2, LV_PART_MAIN);
+    lv_obj_set_style_border_color(touch_cursor, lv_color_hex(0x00E5FF), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(touch_cursor, lv_color_hex(0x00E5FF), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(touch_cursor, LV_OPA_30, LV_PART_MAIN);
+    lv_obj_clear_flag(touch_cursor, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(touch_cursor, LV_OBJ_FLAG_HIDDEN);
+
+    // 2. 坐标数值标签
+    touch_label = lv_label_create(scr);
+    lv_obj_set_style_text_color(touch_label, lv_color_hex(0x00E5FF), LV_PART_MAIN);
+    lv_obj_set_style_text_font(touch_label, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_clear_flag(touch_label, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(touch_label, LV_OBJ_FLAG_HIDDEN);
+
+    // 3. 屏幕对象监听触摸
+    lv_obj_add_flag(scr, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(scr, screen_touch_event_cb, LV_EVENT_ALL, NULL);
 }

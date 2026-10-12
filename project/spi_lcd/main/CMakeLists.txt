@@ -12,4 +12,7 @@ idf_component_register(
         esp_lcd   
         driver
         log
+        lvgl
+        esp_lcd_touch
+        esp_lcd_touch_cst816s
 )
