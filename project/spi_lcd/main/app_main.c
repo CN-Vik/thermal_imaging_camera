@@ -464,16 +464,16 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_timer_create(&lvgl_tick_timer_args, &lvgl_tick_timer));
     ESP_ERROR_CHECK(esp_timer_start_periodic(lvgl_tick_timer, EXAMPLE_LVGL_TICK_PERIOD_MS * 1000));
 
-#if CONFIG_EXAMPLE_LCD_TOUCH_ENABLED
-    // static lv_indev_drv_t indev_drv; // Input device driver (Touch)
-    lv_indev_drv_init(&indev_drv);
-    indev_drv.type = LV_INDEV_TYPE_POINTER;
-    indev_drv.disp = disp;
-    indev_drv.read_cb = example_lvgl_touch_cb;
-    indev_drv.user_data = tp;
+// #if CONFIG_EXAMPLE_LCD_TOUCH_ENABLED
+//     // static lv_indev_drv_t indev_drv; // Input device driver (Touch)
+//     lv_indev_drv_init(&indev_drv);
+//     indev_drv.type = LV_INDEV_TYPE_POINTER;
+//     indev_drv.disp = disp;
+//     indev_drv.read_cb = example_lvgl_touch_cb;
+//     indev_drv.user_data = tp;
 
-    lv_indev_drv_register(&indev_drv);
-#endif
+//     lv_indev_drv_register(&indev_drv);
+// #endif
 
     lvgl_mux = xSemaphoreCreateRecursiveMutex();
     assert(lvgl_mux);
