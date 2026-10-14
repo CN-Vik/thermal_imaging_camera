@@ -1,100 +1,874 @@
-| Supported Targets | ESP32 | ESP32-C2 | ESP32-C3 | ESP32-C6 | ESP32-H2 | ESP32-P4 | ESP32-S2 | ESP32-S3 |
-| ----------------- | ----- | -------- | -------- | -------- | -------- | -------- | -------- | -------- |
+我看了你这个完整 `ir_camera_task_main()`，这已经不是简单的 MLX90640 驱动了，而是一套比较完整的 **ESP32-S3 热成像图像处理 Pipeline（热像仪算法链）**。
 
-# SPI LCD and Touch Panel Example
+整体流程非常清晰，我给你拆一下：
 
-[esp_lcd](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/lcd.html) provides several panel drivers out-of box, e.g. ST7789, SSD1306, NT35510. However, there're a lot of other panels on the market, it's beyond `esp_lcd` component's responsibility to include them all.
+---
 
-`esp_lcd` allows user to add their own panel drivers in the project scope (i.e. panel driver can live outside of esp-idf), so that the upper layer code like LVGL porting code can be reused without any modifications, as long as user-implemented panel driver follows the interface defined in the `esp_lcd` component.
+# 一、整体数据流
 
-This example shows how to use GC9A01 or ILI9341 display driver from Component manager in esp-idf project. These components are using API provided by `esp_lcd` component. This example will draw a fancy dash board with the LVGL library.
-
-This example uses the [esp_timer](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/system/esp_timer.html) to generate the ticks needed by LVGL and uses a dedicated task to run the `lv_timer_handler()`. Since the LVGL APIs are not thread-safe, this example uses a mutex which be invoked before the call of `lv_timer_handler()` and released after it. The same mutex needs to be used in other tasks and threads around every LVGL (lv_...) related function call and code. For more porting guides, please refer to [LVGL porting doc](https://docs.lvgl.io/master/porting/index.html).
-
-## Touch controller STMPE610
-
-In this example you can enable touch controller STMPE610 connected via SPI. The SPI connection is shared with LCD screen.
-
-## How to use the example
-
-### Hardware Required
-
-* An ESP development board
-* An GC9A01 or ILI9341 LCD panel, with SPI interface (with/without STMPE610 SPI touch)
-* An USB cable for power supply and programming
-
-### Hardware Connection
-
-The connection between ESP Board and the LCD is as follows:
+你的代码实际流程：
 
 ```
-       ESP Board                       GC9A01/ILI9341 Panel + TOUCH
-┌──────────────────────┐              ┌────────────────────┐
-│             GND      ├─────────────►│ GND                │
-│                      │              │                    │
-│             3V3      ├─────────────►│ VCC                │
-│                      │              │                    │
-│             PCLK     ├─────────────►│ SCL                │
-│                      │              │                    │
-│             MOSI     ├─────────────►│ MOSI               │
-│                      │              │                    │
-│             MISO     |◄─────────────┤ MISO               │
-│                      │              │                    │
-│             RST      ├─────────────►│ RES                │
-│                      │              │                    │
-│             DC       ├─────────────►│ DC                 │
-│                      │              │                    │
-│             LCD CS   ├─────────────►│ LCD CS             │
-│                      │              │                    │
-│             TOUCH CS ├─────────────►│ TOUCH CS           │
-│                      │              │                    │
-│             BK_LIGHT ├─────────────►│ BLK                │
-└──────────────────────┘              └────────────────────┘
+             MLX90640
+                |
+                |
+        I2C读取768像素
+                |
+                |
+        官方温度计算
+ MLX90640_CalculateTo()
+                |
+                |
+        坏点修复
+ BadPixelsCorrection()
+                |
+                |
+        Subpage棋盘格修正
+                |
+                |
+        时间滤波
+ filtered_temp
+                |
+                |
+        空间滤波
+ spatial_filter_natural()
+                |
+                |
+        温度范围映射
+ 20~35℃ ---> 0~255
+                |
+                |
+        双线性插值
+ 32×24 ---> 240×240
+                |
+                |
+        Ironbow伪彩色
+                |
+                |
+        LVGL显示
+                |
+              LCD
 ```
 
-The GPIO number used by this example can be changed in [lvgl_example_main.c](main/spi_lcd_touch_example_main.c).
-Especially, please pay attention to the level used to turn on the LCD backlight, some LCD module needs a low level to turn it on, while others take a high level. You can change the backlight level macro `EXAMPLE_LCD_BK_LIGHT_ON_LEVEL` in [lvgl_example_main.c](main/spi_lcd_touch_example_main.c).
+这个已经接近一个低端手持热像仪的软件架构。
 
-### Build and Flash
+---
 
-Run `idf.py -p PORT build flash monitor` to build, flash and monitor the project. A fancy animation will show up on the LCD as expected.
+# 二、每一步作用分析
 
-The first time you run `idf.py` for the example will cost extra time as the build system needs to address the component dependencies and downloads the missing components from registry into `managed_components` folder.
+---
 
-(To exit the serial monitor, type ``Ctrl-]``.)
+# 1. MLX90640原始采集
 
-See the [Getting Started Guide](https://docs.espressif.com/projects/esp-idf/en/latest/get-started/index.html) for full steps to configure and use ESP-IDF to build projects.
+这里：
 
-### Example Output
+```c
+MLX90640_GetFrameData()
+```
 
-```bash
-...
-I (409) cpu_start: Starting scheduler on APP CPU.
-I (419) example: Turn off LCD backlight
-I (419) gpio: GPIO[2]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0
-I (429) example: Initialize SPI bus
-I (439) example: Install panel IO
-I (439) gpio: GPIO[5]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0
-I (449) example: Install GC9A01 panel driver
-I (459) gpio: GPIO[3]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0
-I (589) gpio: GPIO[0]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0
-I (589) example: Initialize touch controller STMPE610
-I (589) STMPE610: TouchPad ID: 0x0811
-I (589) STMPE610: TouchPad Ver: 0x03
-I (599) example: Turn on LCD backlight
-I (599) example: Initialize LVGL library
-I (609) example: Register display driver to LVGL
-I (619) example: Install LVGL tick timer
-I (619) example: Starting LVGL task
-I (619) example: Display LVGL animation
-I (619) example: Display LVGL Meter Widget
-...
+拿到：
+
+```
+834 uint16_t
+```
+
+其中：
+
+```
+0~831
+```
+
+是数据。
+
+```
+832
+```
+
+控制信息。
+
+```
+833
+```
+
+subpage。
+
+---
+
+MLX90640不是一次输出768点。
+
+它是：
+
+## Chess模式
+
+两个subpage：
+
+```
+Subpage 0
+
+● ○ ● ○
+○ ● ○ ●
+● ○ ● ○
+
+
+Subpage 1
+
+○ ● ○ ●
+● ○ ● ○
+○ ● ○ ●
+```
+
+两次合起来：
+
+```
+32×24=768
+```
+
+所以你这里：
+
+```c
+subpage_init[2]
+```
+
+处理正确。
+
+---
+
+# 2. 官方温度计算
+
+这里：
+
+```c
+MLX90640_CalculateTo(
+    ir_frame_data,
+    mlx_params,
+    emissivity,
+    ta - TA_SHIFT,
+    raw_temp_matrix
+);
+```
+
+这是核心。
+
+输入：
+
+- ADC红外数据
+- EEPROM校准参数
+- 环境温度
+- 发射率
+
+
+输出：
+
+```
+raw_temp_matrix[]
+```
+
+单位：
+
+℃
+
+
+例如：
+
+```
+25.4
+25.6
+36.7
+```
+
+---
+
+# 3. 坏点校正
+
+这里：
+
+```c
+MLX90640_BadPixelsCorrection()
+```
+
+非常重要。
+
+MLX90640有：
+
+- broken pixels
+- outlier pixels
+
+
+例如：
+
+坏点：
+
+```
+25 25 25
+25 80 25
+25 25 25
+```
+
+修正：
+
+```
+25 25 25
+25 25 25
+25 25 25
 ```
 
 
-## Troubleshooting
+工业热像仪必做。
 
-* Why the LCD doesn't light up?
-  * Check the backlight's turn-on level, and update it in `EXAMPLE_LCD_BK_LIGHT_ON_LEVEL`
+---
 
-For any technical queries, please open an [issue] (https://github.com/espressif/esp-idf/issues) on GitHub. We will get back to you soon.
+# 4. Subpage棋盘失配滤波
+
+你的这段：
+
+```c
+if(diff >0.8)
+```
+
+这是针对 MLX90640 特有问题。
+
+
+因为：
+
+两个subpage：
+
+```
+A:
+●○●○
+
+B:
+○●○●
+```
+
+两个采样时间不同。
+
+
+运动场景：
+
+可能：
+
+A:
+
+```
+人体25℃
+```
+
+B:
+
+```
+人体26℃
+```
+
+
+合成后：
+
+出现棋盘：
+
+```
+25 26 25 26
+
+26 25 26 25
+```
+
+
+你这里：
+
+比较邻居：
+
+```c
+avg
+```
+
+发现差异：
+
+```c
+diff >0.8℃
+```
+
+然后融合。
+
+这个思路不错。
+
+
+---
+
+# 5. 时间滤波（Temporal Filter）
+
+
+这里：
+
+```c
+filtered_temp[i] =
+alpha*raw+
+(1-alpha)*old
+```
+
+
+这是：
+
+指数移动平均 EMA。
+
+
+但是你用了自适应：
+
+## 小变化
+
+```
+d <0.5℃
+```
+
+alpha:
+
+```c
+0.12
+```
+
+强滤波。
+
+
+效果：
+
+```
+25.1
+25.2
+25.1
+25.2
+```
+
+变稳定。
+
+
+---
+
+## 大变化
+
+例如手靠近：
+
+```
+25℃
+→
+36℃
+```
+
+
+d:
+
+>1.5
+
+
+alpha:
+
+```
+0.8
+```
+
+
+响应快。
+
+
+这个设计比固定EMA好。
+
+---
+
+# 6. 空间滤波
+
+这里就是你前面问的：
+
+```c
+spatial_filter_natural()
+```
+
+
+作用：
+
+降低空间噪声。
+
+
+输入：
+
+```
+32×24
+```
+
+输出：
+
+```
+32×24
+```
+
+
+注意：
+
+它不是插值。
+
+只是平滑。
+
+---
+
+# 7. 温度转8bit
+
+
+这里：
+
+```c
+temperature_to_norm_u8()
+```
+
+
+你的：
+
+```c
+20℃~35℃
+```
+
+映射：
+
+```
+20℃
+
+|
+0
+
+
+35℃
+
+|
+255
+```
+
+
+例如：
+
+30℃：
+
+```
+(30-20)/(35-20)*255
+
+=170
+```
+
+
+得到：
+
+```
+0~255
+```
+
+给颜色查表。
+
+
+---
+
+这个设计很关键。
+
+
+很多人喜欢：
+
+每帧：
+
+```
+min=23
+max=37
+```
+
+然后自动拉伸。
+
+
+结果：
+
+画面：
+
+一直呼吸：
+
+红蓝变化。
+
+
+你固定范围：
+
+更像真实产品。
+
+---
+
+# 8. Ironbow LUT
+
+
+这里：
+
+```c
+s_ironbow_lut[256]
+```
+
+
+就是：
+
+温度值:
+
+```
+0~255
+```
+
+映射：
+
+RGB565。
+
+
+比如：
+
+冷：
+
+```
+蓝
+```
+
+中：
+
+```
+红
+```
+
+热：
+
+```
+黄白
+```
+
+
+LCD直接显示。
+
+---
+
+# 9. 双线性插值
+
+
+这里：
+
+```c
+bilinear_scale_fullscreen_1to1()
+```
+
+
+非常关键。
+
+
+MLX90640：
+
+```
+32×24
+```
+
+
+LCD:
+
+```
+240×240
+```
+
+
+直接放：
+
+很难看。
+
+
+所以：
+
+插值：
+
+```
+32×24
+
+↓
+
+240×240
+```
+
+
+类似：
+
+Photoshop放大图片。
+
+
+---
+
+# 10. 双缓冲
+
+
+这里：
+
+```c
+s_display_buf[2]
+```
+
+
+这是LVGL显示优化。
+
+
+避免：
+
+正在刷屏时：
+
+CPU修改buffer。
+
+
+结构：
+
+```
+CPU绘制
+
+buffer A
+
+
+LCD读取
+
+buffer B
+
+
+交换
+```
+
+---
+
+# 三、你的算法等级
+
+我给评价：
+
+|模块|水平|
+|-|-|
+|官方驱动|正确|
+|坏点校正|有|
+|Subpage处理|有|
+|时间滤波|优秀|
+|空间滤波|基础|
+|固定温区映射|正确|
+|双线性插值|有|
+|伪彩色|有|
+|LVGL显示|有|
+|双缓存|有|
+
+整体：
+
+⭐⭐⭐⭐☆
+
+
+已经超过很多DIY项目。
+
+---
+
+# 四、但是还有几个明显不足
+
+如果目标是接近 FLIR / 海曼：
+
+还缺：
+
+---
+
+## 1. NUC非均匀校正
+
+现在：
+
+```
+每个像素独立温度
+```
+
+但是MLX90640：
+
+不同像素：
+
+存在固定偏差。
+
+
+例如：
+
+```
+pixel1 永远 +0.8℃
+pixel2 永远 -0.5℃
+```
+
+
+需要：
+
+offset correction。
+
+
+---
+
+## 2. 边缘增强
+
+
+现在：
+
+滤波后：
+
+会糊。
+
+
+增加：
+
+Unsharp Mask:
+
+```
+sharp =
+original+(original-blur)*k
+```
+
+
+人体轮廓明显。
+
+
+---
+
+## 3. 坏帧检测
+
+
+比如：
+
+I2C异常：
+
+温度：
+
+```
+-40℃
+```
+
+现在：
+
+主要靠：
+
+```
+val >1
+val<200
+```
+
+
+可以增加：
+
+CRC / frame validity。
+
+
+---
+
+## 4. 自动温区
+
+
+你现在：
+
+```c
+20~35℃
+```
+
+室内很好。
+
+
+但是：
+
+室外：
+
+-20℃
+或者
+
+发动机：
+
+100℃
+
+
+不适合。
+
+
+产品一般：
+
+固定模式+自动模式。
+
+
+---
+
+# 五、如果这是你的 ESP32-S3 热成像项目
+
+我觉得方向非常对。
+
+你的硬件：
+
+ESP32-S3
++
+ST7789
++
+MLX90640
+
+
+这个代码已经接近：
+
+```
+Seek Compact
+低端模式
+```
+
+但是：
+
+ESP32-S3还能继续优化：
+
+建议增加：
+
+```
+MLX90640
+ |
+NUC
+ |
+Bad pixel
+ |
+Temporal filter
+ |
+Spatial filter
+ |
+Edge enhancement
+ |
+Bilinear
+ |
+Pseudo color
+ |
+LVGL
+```
+
+---
+
+另外我注意到一个地方：
+
+你现在：
+
+```c
+float *raw_temp_matrix
+float *filtered_temp
+float *spatial_temp
+```
+
+三个：
+
+768 float
+
+
+内存：
+
+约：
+
+```
+768*4*3
+=
+9.2KB
+```
+
+没问题。
+
+ESP32-S3完全可以。
+
+
+---
+
+总体评价：
+
+**这个代码不是简单demo，是一个完整热像仪显示算法框架。**
+
+如果后续升级到：
+
+- MLX90642（32×24但是更快）
+- Heimann 32×32 / 80×64
+- FLIR Lepton 160×120
+- RV1106双光融合
+
+这个架构基本还能复用。你现在缺的主要是 **NUC校准 + 边缘增强 + RGB融合**。你之前说想做双光融合，这个代码可以作为热通道部分。
