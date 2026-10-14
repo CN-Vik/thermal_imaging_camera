@@ -40,7 +40,7 @@ flasher_args.json # Generated in build directory
 # managed_components/
 # If ESP-IDF tools are installed/referenced locally to the project
 .espressif/
-
+.vscode/*
 # CMake generated files
 CMakeCache.txt
 CMakeFiles/
