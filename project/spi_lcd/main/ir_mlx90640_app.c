@@ -35,7 +35,9 @@ static float emissivity = 0.95f;
 #define TEMP_FILTER_MOTION_SAT_C        2.20f
 
 /* 3x3 中值异常点抑制阈值；降低会更积极地抑制孤立噪点 */
-#define THERMAL_OUTLIER_THRESH_C        1.0f
+#define THERMAL_OUTLIER_THRESH_C        1.2f
+#define THERMAL_OUTLIER_NEIGHBOR_BAND_C  0.75f
+#define THERMAL_OUTLIER_MIN_CONSENSUS    6
 
 /*
  * 自动量程参数：
@@ -227,11 +229,36 @@ static void spatial_median_outlier_filter(const float *src, float *dst, int w, i
             }
 
             float median = v[n / 2];
+
+            /*
+             * 关键保护：只有周围至少 6 个邻居都支持同一个温度簇时，
+             * 才把中心点当成孤立噪点。这样能避免把手指缝/根部的真实冷像素
+             * 误判成噪声，再拉高到手指温度，造成“趾蹼”。
+             */
+            int consensus = 0;
+            for (int dy = -1; dy <= 1; dy++) {
+                int rr = r + dy;
+                if (rr < 0) rr = 0;
+                if (rr >= h) rr = h - 1;
+                for (int dx = -1; dx <= 1; dx++) {
+                    if (dx == 0 && dy == 0) continue;
+                    int cc = c + dx;
+                    if (cc < 0) cc = 0;
+                    if (cc >= w) cc = w - 1;
+                    float t = src[rr * w + cc];
+                    if (isfinite(t) && t > 1.0f && t < 200.0f &&
+                        fabsf(t - median) <= THERMAL_OUTLIER_NEIGHBOR_BAND_C) {
+                        consensus++;
+                    }
+                }
+            }
+
             float diff = fabsf(center - median);
-            if (diff > THERMAL_OUTLIER_THRESH_C) {
+            if (consensus >= THERMAL_OUTLIER_MIN_CONSENSUS &&
+                diff > THERMAL_OUTLIER_THRESH_C) {
                 float strength = clampf_local(
                     (diff - THERMAL_OUTLIER_THRESH_C) / 1.5f,
-                    0.0f, 0.65f);
+                    0.0f, 0.50f);
                 dst[idx] = center + strength * (median - center);
             } else {
                 dst[idx] = center;
@@ -250,12 +277,12 @@ static int compare_float_ascending(const void *a, const void *b)
 /*
  * 3. 对称式 3x3 双边保边平滑滤波（消除空间颗粒感与静态奇偶场微差，不放大噪声）
  *    - 对所有像素一视同仁，消除固定图案噪声 (FPN)
- *    - 温差 < 1.8℃ 的区域（手掌内部、背景内部）强力平滑磨皮
- *    - 温差 >= 1.8℃ 的区域（手指边缘、指缝）自动截断权重，保持轮廓锐利
+ *    - 平坦区域继续降噪
+ *    - 更早识别手指边缘/指缝，避免低对比度缝隙被平滑填平
  */
 static void spatial_bilateral_denoise(const float *src, float *dst, int w, int h)
 {
-    const float edge_thresh = 1.8f;
+    const float edge_thresh = 1.25f;
     const float inv_edge_thresh = 1.0f / edge_thresh;
 
     for (int r = 0; r < h; r++) {
@@ -286,8 +313,8 @@ static void spatial_bilateral_denoise(const float *src, float *dst, int w, int h
 
             // 先对称消除中心点与正交邻域的静态奇偶微差
             float ortho_avg = 0.25f * (ortho[0] + ortho[1] + ortho[2] + ortho[3]);
-            if (fabsf(center - ortho_avg) < 0.80f) {
-                center = 0.70f * center + 0.30f * ortho_avg;
+            if (fabsf(center - ortho_avg) < 0.45f) {
+                center = 0.85f * center + 0.15f * ortho_avg;
             }
 
             float sum_smooth = center * 4.0f;
