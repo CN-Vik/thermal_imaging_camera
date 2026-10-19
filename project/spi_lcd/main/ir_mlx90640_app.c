@@ -25,31 +25,24 @@ static float emissivity = 0.95f;
 #define THERMAL_FIXED_MAX_C             35.0f
 
 /*
- * 时域降噪参数（针对 16Hz 下 MLX90640 约 0.5℃ 峰峰值底噪优化）：
- * - 温差 < 0.65℃ 视为静态热噪声，使用 0.08 强平滑，彻底压住背景噪点翻滚
- * - 温差在 0.65℃ ~ 2.20℃ 之间线性平滑过渡 alpha，超过 2.20℃ 快速跟手无残影
+ * 强化版时域降噪参数：
+ * - TEMP_FILTER_ALPHA_MIN 降至 0.04f（强力IIR低通滤波，彻底锁死静态背景翻滚）
+ * - TEMP_FILTER_NOISE_FLOOR_C 提至 0.85℃，过滤 16Hz 下的传感器底噪尖峰
+ * - 过渡区采用二次方曲线 (t^2) + 同场邻域协同检测，抑制孤立噪点穿透
  */
-#define TEMP_FILTER_ALPHA_MIN           0.05f
+#define TEMP_FILTER_ALPHA_MIN           0.04f
 #define TEMP_FILTER_ALPHA_MAX           0.85f
-#define TEMP_FILTER_NOISE_FLOOR_C       0.75f
-#define TEMP_FILTER_MOTION_SAT_C        2.20f
-
-/* 3x3 中值异常点抑制阈值；降低会更积极地抑制孤立噪点 */
-#define THERMAL_OUTLIER_THRESH_C        1.2f
-#define THERMAL_OUTLIER_NEIGHBOR_BAND_C  0.75f
-#define THERMAL_OUTLIER_MIN_CONSENSUS    6
+#define TEMP_FILTER_NOISE_FLOOR_C       0.85f
+#define TEMP_FILTER_MOTION_SAT_C        2.50f
 
 /*
  * 自动量程参数：
- * - AUTO_RANGE_MIN_SPAN_C 设为 10.0℃，防止无热源时把 5℃ 的背景底噪拉伸成满屏花斑
- * - AUTO_RANGE_HIGHLIGHT_HEADROOM_C 预留 1.3℃ 顶部余量，防止手掌核心区过曝惨白
+ * - AUTO_RANGE_MIN_SPAN_C 提至 12.0℃，无高温物体时大幅压缩背景动态放大倍数
  */
-#define AUTO_RANGE_MIN_SPAN_C           10.0f
-#define AUTO_RANGE_LOW_PADDING_C        0.4f
+#define AUTO_RANGE_MIN_SPAN_C           12.0f
+#define AUTO_RANGE_LOW_PADDING_C        0.5f
 #define AUTO_RANGE_HIGHLIGHT_HEADROOM_C 1.3f
-#define AUTO_RANGE_ALPHA                0.04f
-#define THERMAL_PERCENTILE_LOW           5
-#define THERMAL_PERCENTILE_HIGH          95
+#define AUTO_RANGE_ALPHA                0.03f
 
 /*
  * 图像方向校准开关：
@@ -88,18 +81,20 @@ static inline float clampf_local(float v, float lo, float hi)
 }
 
 /*
- * 1. 分场时域滤波 + 动态消交错（在 filtered_temp 状态缓冲上直接演进）
- *    - 阶段 A：仅对本帧新测量的 subpage 像素做连续自适应 IIR 时域降噪
- *    - 阶段 B：对未测量的另一半旧像素，平时保持不动（杜绝 11Hz 奇偶场闪烁）；
- *              一旦检测到周围 4 个最新邻居发生运动跨越，立即做运动插值补偿，消除运动棋盘格
+ * 1. 强化版分场时域滤波 + 同场协同抗尖峰 + 动态消交错
+ *    - 阶段 A：结合 4 个同子场对角邻居的变化情况，区分“单点热噪尖峰”与“真实大面积运动”
+ *    - 阶段 B：对未采样的旧子场像素消除静态微差与运动撕裂
  */
 static void update_temporal_and_deinterlace(const float *raw_src, float *filt_state,
                                             int w, int h, int subpage)
 {
     const float inv_motion_span = 1.0f / (TEMP_FILTER_MOTION_SAT_C - TEMP_FILTER_NOISE_FLOOR_C);
 
-    // 阶段 A：仅更新当前 subpage 新采样的 384 个真实像素
+    // 阶段 A：更新当前 subpage 新采样的 384 个像素
     for (int r = 0; r < h; r++) {
+        int r_prev = (r > 0) ? (r - 1) : r;
+        int r_next = (r < h - 1) ? (r + 1) : r;
+
         for (int c = 0; c < w; c++) {
             if (((r + c) & 1) != subpage) {
                 continue;
@@ -113,15 +108,42 @@ static void update_temporal_and_deinterlace(const float *raw_src, float *filt_st
                 continue;
             }
 
+            int c_prev = (c > 0) ? (c - 1) : c;
+            int c_next = (c < w - 1) ? (c + 1) : c;
+
+            // 计算 4 个同子场对角邻居在当前帧的采样均值，用于抑制单像素随机爆米花噪点
+            float d0 = raw_src[r_prev * w + c_prev];
+            float d1 = raw_src[r_prev * w + c_next];
+            float d2 = raw_src[r_next * w + c_prev];
+            float d3 = raw_src[r_next * w + c_next];
+            float diag_raw_avg = 0.25f * (d0 + d1 + d2 + d3);
+
+            // 若当前原始值与同场周围均值偏差较小 (< 1.2℃)，先做 20% 空间预柔化再进时域滤波
+            if (fabsf(raw_v - diag_raw_avg) < 1.20f) {
+                raw_v = 0.80f * raw_v + 0.20f * diag_raw_avg;
+            }
+
             float d = fabsf(raw_v - prev_v);
+
+            // 检查同场对角邻居是否也在同步发生时域跳变（判断是否为真实的物体运动）
+            float pd0 = fabsf(d0 - filt_state[r_prev * w + c_prev]);
+            float pd1 = fabsf(d1 - filt_state[r_prev * w + c_next]);
+            float pd2 = fabsf(d2 - filt_state[r_next * w + c_prev]);
+            float pd3 = fabsf(d3 - filt_state[r_next * w + c_next]);
+            float neighbor_motion = 0.25f * (pd0 + pd1 + pd2 + pd3);
+
+            // 如果只有当前像素自己跳变很大，但周围同场邻居静止 (< 0.55℃)，说明是孤立噪点尖峰！
+            float eff_d = (neighbor_motion < 0.55f) ? (0.50f * d) : d;
+
             float alpha;
-            if (d <= TEMP_FILTER_NOISE_FLOOR_C) {
+            if (eff_d <= TEMP_FILTER_NOISE_FLOOR_C) {
                 alpha = TEMP_FILTER_ALPHA_MIN;
-            } else if (d >= TEMP_FILTER_MOTION_SAT_C) {
+            } else if (eff_d >= TEMP_FILTER_MOTION_SAT_C) {
                 alpha = TEMP_FILTER_ALPHA_MAX;
             } else {
-                float t = (d - TEMP_FILTER_NOISE_FLOOR_C) * inv_motion_span;
-                alpha = TEMP_FILTER_ALPHA_MIN + t * (TEMP_FILTER_ALPHA_MAX - TEMP_FILTER_ALPHA_MIN);
+                float t = (eff_d - TEMP_FILTER_NOISE_FLOOR_C) * inv_motion_span;
+                // 使用 t * t 二次方曲线压低中低频噪声的通过率
+                alpha = TEMP_FILTER_ALPHA_MIN + (t * t) * (TEMP_FILTER_ALPHA_MAX - TEMP_FILTER_ALPHA_MIN);
             }
 
             filt_state[idx] = prev_v + alpha * (raw_v - prev_v);
@@ -163,7 +185,6 @@ static void update_temporal_and_deinterlace(const float *raw_src, float *filt_st
 
             float ortho_med = 0.5f * (n1 + n2);
 
-            // 计算旧像素跑出最新邻居中间区间 [n1, n2] 的越界量
             float out_of_bounds = 0.0f;
             if (val < n1) {
                 out_of_bounds = n1 - val;
@@ -171,10 +192,8 @@ static void update_temporal_and_deinterlace(const float *raw_src, float *filt_st
                 out_of_bounds = val - n2;
             }
 
-            // 只有当越界量超过静态噪声阈值 (0.55℃) 时，才判定为运动撕裂并拉向最新场中值
-            // 静态时完全不触碰旧场像素，彻底杜绝 11Hz 奇偶场交替闪烁！
-            if (out_of_bounds > 0.55f) {
-                float m_weight = clampf_local((out_of_bounds - 0.55f) * 0.65f, 0.25f, 0.92f);
+            if (out_of_bounds > 0.48f) {
+                float m_weight = clampf_local((out_of_bounds - 0.48f) * 0.70f, 0.25f, 0.92f);
                 filt_state[idx] = val + m_weight * (ortho_med - val);
             }
         }
@@ -182,107 +201,49 @@ static void update_temporal_and_deinterlace(const float *raw_src, float *filt_st
 }
 
 /*
- * 2. 3x3 鲁棒中值异常点抑制
- * 仅对明显偏离邻域中值的孤立像素做部分修正，尽量保留连续的手指边缘。
- * src/dst 必须是不同缓冲区。
+ * 2. 3x3 邻域极值毛刺剔除滤波（Despeckle）
+ *    - 若中心像素比周围 8 个邻居的最大值还高，或比最小值还低（孤立噪点/麻点），
+ *      直接将其钳位到 8 邻域的 [min, max] 包络内，100% 滤除单点脉冲噪点且不伤边缘
  */
-static void spatial_median_outlier_filter(const float *src, float *dst, int w, int h)
+static void spatial_despeckle_3x3(const float *src, float *dst, int w, int h)
 {
     for (int r = 0; r < h; r++) {
+        int r_prev = (r > 0) ? (r - 1) : r;
+        int r_next = (r < h - 1) ? (r + 1) : r;
+
         for (int c = 0; c < w; c++) {
-            float v[9];
-            int n = 0;
+            int c_prev = (c > 0) ? (c - 1) : c;
+            int c_next = (c < w - 1) ? (c + 1) : c;
 
-            for (int dy = -1; dy <= 1; dy++) {
-                int rr = r + dy;
-                if (rr < 0) rr = 0;
-                if (rr >= h) rr = h - 1;
+            float center = src[r * w + c];
 
-                for (int dx = -1; dx <= 1; dx++) {
-                    int cc = c + dx;
-                    if (cc < 0) cc = 0;
-                    if (cc >= w) cc = w - 1;
+            float nb[8] = {
+                src[r_prev * w + c],      src[r_next * w + c],
+                src[r * w + c_prev],      src[r * w + c_next],
+                src[r_prev * w + c_prev], src[r_prev * w + c_next],
+                src[r_next * w + c_prev], src[r_next * w + c_next]
+            };
 
-                    float t = src[rr * w + cc];
-                    if (isfinite(t) && t > 1.0f && t < 200.0f) {
-                        v[n++] = t;
-                    }
-                }
+            float nb_min = nb[0];
+            float nb_max = nb[0];
+            for (int i = 1; i < 8; i++) {
+                if (nb[i] < nb_min) nb_min = nb[i];
+                if (nb[i] > nb_max) nb_max = nb[i];
             }
 
-            int idx = r * w + c;
-            float center = src[idx];
-            if (!isfinite(center) || center <= 1.0f || center >= 200.0f || n < 5) {
-                dst[idx] = center;
-                continue;
-            }
-
-            // 9 个以内元素，插入排序开销很小。
-            for (int i = 1; i < n; i++) {
-                float key = v[i];
-                int j = i - 1;
-                while (j >= 0 && v[j] > key) {
-                    v[j + 1] = v[j];
-                    j--;
-                }
-                v[j + 1] = key;
-            }
-
-            float median = v[n / 2];
-
-            /*
-             * 关键保护：只有周围至少 6 个邻居都支持同一个温度簇时，
-             * 才把中心点当成孤立噪点。这样能避免把手指缝/根部的真实冷像素
-             * 误判成噪声，再拉高到手指温度，造成“趾蹼”。
-             */
-            int consensus = 0;
-            for (int dy = -1; dy <= 1; dy++) {
-                int rr = r + dy;
-                if (rr < 0) rr = 0;
-                if (rr >= h) rr = h - 1;
-                for (int dx = -1; dx <= 1; dx++) {
-                    if (dx == 0 && dy == 0) continue;
-                    int cc = c + dx;
-                    if (cc < 0) cc = 0;
-                    if (cc >= w) cc = w - 1;
-                    float t = src[rr * w + cc];
-                    if (isfinite(t) && t > 1.0f && t < 200.0f &&
-                        fabsf(t - median) <= THERMAL_OUTLIER_NEIGHBOR_BAND_C) {
-                        consensus++;
-                    }
-                }
-            }
-
-            float diff = fabsf(center - median);
-            if (consensus >= THERMAL_OUTLIER_MIN_CONSENSUS &&
-                diff > THERMAL_OUTLIER_THRESH_C) {
-                float strength = clampf_local(
-                    (diff - THERMAL_OUTLIER_THRESH_C) / 1.5f,
-                    0.0f, 0.50f);
-                dst[idx] = center + strength * (median - center);
-            } else {
-                dst[idx] = center;
-            }
+            // 钳位孤立热尖峰与冷尖峰
+            dst[r * w + c] = clampf_local(center, nb_min, nb_max);
         }
     }
 }
 
-static int compare_float_ascending(const void *a, const void *b)
-{
-    float x = *(const float *)a;
-    float y = *(const float *)b;
-    return (x > y) - (x < y);
-}
-
 /*
- * 3. 对称式 3x3 双边保边平滑滤波（消除空间颗粒感与静态奇偶场微差，不放大噪声）
- *    - 对所有像素一视同仁，消除固定图案噪声 (FPN)
- *    - 平坦区域继续降噪
- *    - 更早识别手指边缘/指缝，避免低对比度缝隙被平滑填平
+ * 3. 强化版对称式 3x3 双边保边平滑滤波（支持多级级联调用）
+ *    - 降低中心点自权重（从 4.0 降至 2.0），大幅提升平坦区与手掌内部的空间平滑度
+ *    - 扩大奇偶子场微差融合范围，彻底抹平块状底噪
  */
-static void spatial_bilateral_denoise(const float *src, float *dst, int w, int h)
+static void spatial_bilateral_denoise(const float *src, float *dst, int w, int h, float edge_thresh)
 {
-    const float edge_thresh = 1.25f;
     const float inv_edge_thresh = 1.0f / edge_thresh;
 
     for (int r = 0; r < h; r++) {
@@ -311,14 +272,17 @@ static void spatial_bilateral_denoise(const float *src, float *dst, int w, int h
                 src[r_next * w + c_next]
             };
 
-            // 先对称消除中心点与正交邻域的静态奇偶微差
+            // 强力消除中心点与正交邻域的静态奇偶微差
             float ortho_avg = 0.25f * (ortho[0] + ortho[1] + ortho[2] + ortho[3]);
-            if (fabsf(center - ortho_avg) < 0.45f) {
-                center = 0.85f * center + 0.15f * ortho_avg;
+            float diff_o_avg = fabsf(center - ortho_avg);
+            if (diff_o_avg < 1.10f) {
+                float blend = 0.45f * (1.0f - diff_o_avg * (1.0f / 1.10f));
+                center = (1.0f - blend) * center + blend * ortho_avg;
             }
 
-            float sum_smooth = center * 4.0f;
-            float w_total = 4.0f;
+            // 中心权重设为 2.0f（原为 4.0f），使周围 8 邻域的平滑贡献翻倍
+            float sum_smooth = center * 2.0f;
+            float w_total = 2.0f;
 
             for (int i = 0; i < 4; i++) {
                 float d_o = fabsf(ortho[i] - center);
@@ -332,7 +296,7 @@ static void spatial_bilateral_denoise(const float *src, float *dst, int w, int h
                 float d_d = fabsf(diag[i] - center);
                 if (d_d < edge_thresh) {
                     float t = 1.0f - d_d * inv_edge_thresh;
-                    float w_d = 1.0f * t * t;
+                    float w_d = 1.2f * t * t;
                     sum_smooth += diag[i] * w_d;
                     w_total += w_d;
                 }
@@ -539,10 +503,9 @@ static void temperature_to_norm_u8(const float *src, uint8_t *dst,
         float norm = (src[i] - map_min) * range_inv;
         norm = clampf_local(norm, 0.0f, 1.0f);
 
-        // 温和对比度曲线 (0.65 * norm^1.5 + 0.35 * norm)：
-        // 既压低背景暗部噪点，又保留手掌高温区的细节层次，防止手心一片惨白过曝
+        // 平滑暗部压制曲线：将底噪压在深蓝暗部，同时保持高温区自然过渡
         float gamma_15 = norm * sqrtf(norm);
-        norm = 0.65f * gamma_15 + 0.35f * norm;
+        norm = 0.72f * gamma_15 + 0.28f * norm;
 
         dst[i] = (uint8_t)(norm * 255.0f + 0.5f);
     }
@@ -568,12 +531,12 @@ void ir_camera_task_main(void *pvParameters)
     paramsMLX90640 *mlx_params = (paramsMLX90640 *)calloc(1, sizeof(paramsMLX90640));
 
     float *filtered_temp = (float *)calloc(MLX_RAW_PIXELS, sizeof(float));
-    float *median_temp   = (float *)calloc(MLX_RAW_PIXELS, sizeof(float));
+    float *pass1_temp    = (float *)calloc(MLX_RAW_PIXELS, sizeof(float));
     float *spatial_temp  = (float *)calloc(MLX_RAW_PIXELS, sizeof(float));
     uint8_t *norm_matrix = (uint8_t *)calloc(MLX_RAW_PIXELS, sizeof(uint8_t));
 
     if (!ir_frame_data || !eerom_ir_data || !raw_temp_matrix || !mlx_params ||
-        !filtered_temp || !median_temp || !spatial_temp || !norm_matrix) {
+        !filtered_temp || !pass1_temp || !spatial_temp || !norm_matrix) {
         ESP_LOGE(TAG, "Critical: calloc failed, Out of memory!");
         vTaskDelete(NULL);
         return;
@@ -629,23 +592,21 @@ void ir_camera_task_main(void *pvParameters)
             frame_count++;
 
             if (!subpage_init[0] || !subpage_init[1]) {
-                // 首轮先将 raw_temp_matrix 同步到 filtered_temp
                 memcpy(filtered_temp, raw_temp_matrix, MLX_RAW_PIXELS * sizeof(float));
                 vTaskDelay(pdMS_TO_TICKS(2));
                 continue;
             }
 
-            // 2. 分场时域平滑 + 运动补偿
-            update_temporal_and_deinterlace(raw_temp_matrix, filtered_temp,
-                                            MLX_RAW_W, MLX_RAW_H, subpage);
+            // 2. 强化分场时域平滑 + 同场协同抗尖峰 + 运动防撕裂
+            update_temporal_and_deinterlace(raw_temp_matrix, filtered_temp, MLX_RAW_W, MLX_RAW_H, subpage);
 
-            // 3. 中值异常点抑制：去除孤立温度跳点，尽量保留边缘
-            spatial_median_outlier_filter(filtered_temp, median_temp,
-                                          MLX_RAW_W, MLX_RAW_H);
-
-            // 4. 双边保边平滑：继续压制背景颗粒，不直接模糊强温差边缘
-            spatial_bilateral_denoise(median_temp, spatial_temp,
-                                      MLX_RAW_W, MLX_RAW_H);
+            // 3. 三级空间降噪管线：
+            //    (a) 3x3 邻域极值毛刺剔除（削平孤立亮暗噪点）
+            //    (b) 第一级宽阈值双边滤波 (2.2℃)：强力抹平大块背景热斑
+            //    (c) 第二级精修双边滤波 (1.5℃)：形成等效 5x5 丝滑过渡，同时保留热源边界
+            spatial_despeckle_3x3(filtered_temp, spatial_temp, MLX_RAW_W, MLX_RAW_H);
+            spatial_bilateral_denoise(spatial_temp, pass1_temp, MLX_RAW_W, MLX_RAW_H, 2.20f);
+            spatial_bilateral_denoise(pass1_temp, spatial_temp, MLX_RAW_W, MLX_RAW_H, 1.50f);
 
             // 4. 统计极值
             float cur_min = 200.0f;
@@ -669,28 +630,10 @@ void ir_camera_task_main(void *pvParameters)
             }
 
 #if THERMAL_USE_AUTO_RANGE
-            // 用 5%/95% 分位数决定颜色映射范围，避免单个异常像素拉伸整幅图像。
-            // median_temp 可复用为排序工作区；spatial_temp 保留原始滤波图用于显示和测温。
-            int n_valid = 0;
-            for (int i = 0; i < MLX_RAW_PIXELS; i++) {
-                float t = spatial_temp[i];
-                if (isfinite(t) && t > 1.0f && t < 200.0f) {
-                    median_temp[n_valid++] = t;
-                }
-            }
+            float target_min = cur_min - AUTO_RANGE_LOW_PADDING_C;
+            float target_max = cur_max + AUTO_RANGE_HIGHLIGHT_HEADROOM_C;
 
-            float robust_min = cur_min;
-            float robust_max = cur_max;
-            if (n_valid >= 100) {
-                qsort(median_temp, n_valid, sizeof(float), compare_float_ascending);
-                robust_min = median_temp[(n_valid - 1) * THERMAL_PERCENTILE_LOW / 100];
-                robust_max = median_temp[(n_valid - 1) * THERMAL_PERCENTILE_HIGH / 100];
-            }
-
-            float target_min = robust_min - AUTO_RANGE_LOW_PADDING_C;
-            float target_max = robust_max + AUTO_RANGE_HIGHLIGHT_HEADROOM_C;
-
-            // 当画面中没有高温物体（温差小于 10℃）时，优先向下扩展量程上限，将背景固定在深蓝暗部
+            // 当画面中没有高温物体（温差小于 12℃）时，优先向上扩展量程上限，将背景固定在深蓝暗部
             if ((target_max - target_min) < AUTO_RANGE_MIN_SPAN_C) {
                 target_max = target_min + AUTO_RANGE_MIN_SPAN_C;
             }
