@@ -25,11 +25,11 @@ static float emissivity = 0.95f;
 #define THERMAL_FIXED_MAX_C            35.0f
 
 /* Very small changes are mostly sensor noise; smooth them strongly. */
-#define TEMP_FILTER_ALPHA_SMALL         0.12f
-#define TEMP_FILTER_ALPHA_MEDIUM        0.35f
-#define TEMP_FILTER_ALPHA_LARGE         0.80f
-#define TEMP_FILTER_MEDIUM_THRESHOLD     0.50f
-#define TEMP_FILTER_LARGE_THRESHOLD      1.50f
+#define TEMP_FILTER_ALPHA_SMALL         0.15f
+#define TEMP_FILTER_ALPHA_MEDIUM        0.50f
+#define TEMP_FILTER_ALPHA_LARGE         0.88f
+#define TEMP_FILTER_MEDIUM_THRESHOLD     0.35f
+#define TEMP_FILTER_LARGE_THRESHOLD      1.90f
 
 /* If auto-range is enabled, it moves very slowly and keeps a wide margin. */
 #define AUTO_RANGE_MIN_SPAN_C            6.0f
@@ -66,53 +66,14 @@ static uint16_t s_ironbow_lut[256];
 const float rate_hz_table[] = {0.5f, 1.0f, 2.0f, 4.0f, 8.0f, 16.0f, 32.0f, 64.0f};
 
 /*
- * 1. 纯净版棋盘格抑制（绝不原地修改 raw_temp_matrix，且只在平坦区消除奇偶场微差）
- */
-static void despike_checkerboard(const float *src, float *dst, int w, int h)
-{
-    for (int r = 0; r < h; r++) {
-        for (int c = 0; c < w; c++) {
-            int idx = r * w + c;
-            float val = src[idx];
-
-            if (r == 0 || r == h - 1 || c == 0 || c == w - 1) {
-                dst[idx] = val;
-                continue;
-            }
-
-            float n_up    = src[(r - 1) * w + c];
-            float n_down  = src[(r + 1) * w + c];
-            float n_left  = src[r * w + (c - 1)];
-            float n_right = src[r * w + (c + 1)];
-
-            // 计算四邻域自身的最大最小温差（判断当前是否处于物体边缘/指缝）
-            float n_max = fmaxf(fmaxf(n_up, n_down), fmaxf(n_left, n_right));
-            float n_min = fminf(fminf(n_up, n_down), fminf(n_left, n_right));
-
-            // 只有当四邻域自身很平坦（温差 < 1.2℃），说明不是手指边缘，才进行棋盘格平滑！
-            // 如果处于手指与背景/指缝的交界处，100% 保留原始锐利度！
-            if ((n_max - n_min) < 1.2f) {
-                float avg = 0.25f * (n_up + n_down + n_left + n_right);
-                float diff = fabsf(val - avg);
-                if (diff > 0.3f && diff < 1.5f) {
-                    dst[idx] = 0.65f * val + 0.35f * avg;
-                    continue;
-                }
-            }
-            dst[idx] = val;
-        }
-    }
-}
-
-/*
- * 2. 双边保边滤波 + 指缝微锐化 (Edge-Preserving Bilateral + Unsharp Mask)
- *    - 温差小 (< 0.8℃)：平滑背景热噪
- *    - 温差大 (> 1.2℃)：判定为手指边缘/指缝，不但不模糊，反而做微弱反相锐化拉开差距！
+ * 2. 双边保边滤波 + 同子场对角微锐化
+ *    - 降噪使用 8 邻域双边加权
+ *    - 锐化仅使用 4 个对角邻居（与中心点属于同一 subpage），防止把奇偶场温差当成边缘放大！
  */
 static void spatial_filter_sharp_hand(const float *src, float *dst, int w, int h)
 {
-    const float edge_thresh = 1.0f;   // 超过 1.0℃ 视为手指边界，禁止跨界模糊
-    const float sharpen_gain = 0.22f; // 边缘锐化强度，帮助切开指缝趾蹼
+    const float edge_thresh = 1.2f;
+    const float sharpen_gain = 0.20f;
 
     for (int r = 0; r < h; r++) {
         int r_prev = (r > 0) ? (r - 1) : r;
@@ -123,34 +84,46 @@ static void spatial_filter_sharp_hand(const float *src, float *dst, int w, int h
             int c_next = (c < w - 1) ? (c + 1) : c;
 
             float center = src[r * w + c];
-            float sum_smooth = center * 8.0f;
-            float w_total = 8.0f;
+            float sum_smooth = center * 6.0f;
+            float w_total = 6.0f;
 
-            // 四邻域坐标值
-            float nb[4] = {
+            // 正交 4 邻域（异子场）
+            float ortho[4] = {
                 src[r_prev * w + c],
                 src[r_next * w + c],
                 src[r * w + c_prev],
                 src[r * w + c_next]
             };
 
-            float nb_avg = 0.25f * (nb[0] + nb[1] + nb[2] + nb[3]);
+            // 对角 4 邻域（同子场！）
+            float diag[4] = {
+                src[r_prev * w + c_prev],
+                src[r_prev * w + c_next],
+                src[r_next * w + c_prev],
+                src[r_next * w + c_next]
+            };
 
             for (int i = 0; i < 4; i++) {
-                float diff = fabsf(nb[i] - center);
-                if (diff < edge_thresh) {
-                    // 同一物体内部（如手掌心或纯背景）：正常降噪平滑
-                    float w_nb = 1.5f * (1.0f - diff / edge_thresh);
-                    sum_smooth += nb[i] * w_nb;
-                    w_total += w_nb;
+                float d_o = fabsf(ortho[i] - center);
+                if (d_o < edge_thresh) {
+                    float w_o = 1.5f * (1.0f - d_o / edge_thresh);
+                    sum_smooth += ortho[i] * w_o;
+                    w_total += w_o;
+                }
+                float d_d = fabsf(diag[i] - center);
+                if (d_d < edge_thresh) {
+                    float w_d = 0.75f * (1.0f - d_d / edge_thresh);
+                    sum_smooth += diag[i] * w_d;
+                    w_total += w_d;
                 }
             }
 
             float base_val = sum_smooth / w_total;
 
-            // 高频分量（当前点与四邻域均值的落差）：如果落差大（处于手指边缘或指缝谷底），进行反锐化掩模增强
-            float high_freq = center - nb_avg;
-            if (fabsf(high_freq) > 0.6f) {
+            // 关键：用【同子场】的 4 个对角邻居均值计算高频分量，只锐化真实指缝，绝不放大棋盘格！
+            float diag_avg = 0.25f * (diag[0] + diag[1] + diag[2] + diag[3]);
+            float high_freq = center - diag_avg;
+            if (fabsf(high_freq) > 0.5f) {
                 base_val += high_freq * sharpen_gain;
             }
 
@@ -158,7 +131,6 @@ static void spatial_filter_sharp_hand(const float *src, float *dst, int w, int h
         }
     }
 }
-
 
 /*
  * Natural spatial filter.
@@ -391,6 +363,76 @@ static inline float clampf_local(float v, float lo, float hi)
     return v;
 }
 
+/*
+ * 1. 子场相位感知的动态消交错滤波（彻底解决运动热源棋盘格撕裂）
+ *    - 新子场像素 ((r + c) & 1) == subpage : 保持最新真实测量值，仅在平坦区消除静态微差
+ *    - 旧子场像素 ((r + c) & 1) != subpage : 其上下左右 4 个邻居全是最新的！一旦发生运动温差，立即向最新场对齐
+ */
+static void despike_checkerboard(const float *src, float *dst, int w, int h, int subpage)
+{
+    for (int r = 0; r < h; r++) {
+        int r_prev = (r > 0) ? (r - 1) : r;
+        int r_next = (r < h - 1) ? (r + 1) : r;
+
+        for (int c = 0; c < w; c++) {
+            int idx = r * w + c;
+            float val = src[idx];
+
+            int c_prev = (c > 0) ? (c - 1) : c;
+            int c_next = (c < w - 1) ? (c + 1) : c;
+
+            // 上下左右四个正交邻居（在棋盘格模式下，它们的奇偶性与当前点完全相反）
+            float n0 = src[r_prev * w + c];
+            float n1 = src[r_next * w + c];
+            float n2 = src[r * w + c_prev];
+            float n3 = src[r * w + c_next];
+
+            // 对 4 个正交邻居做快速排序网络，取中间两个值的均值（抗边缘模糊的中值估计）
+            if (n0 > n1) { float t = n0; n0 = n1; n1 = t; }
+            if (n2 > n3) { float t = n2; n2 = n3; n3 = t; }
+            if (n0 > n2) { float t = n0; n0 = n2; n2 = t; }
+            if (n1 > n3) { float t = n1; n1 = n3; n3 = t; }
+            if (n1 > n2) { float t = n1; n1 = n2; n2 = t; }
+
+            float n_min = n0;
+            float n_max = n3;
+            float ortho_med = 0.5f * (n1 + n2); // 四邻域中值（比简单平均更能保护手指边界）
+            float diff = fabsf(val - ortho_med);
+
+            bool is_fresh_pixel = (((r + c) & 1) == subpage);
+
+            if (!is_fresh_pixel) {
+                /*
+                 * 当前点是上一帧遗留的【旧子场像素】，而包围它的 4 个正交邻居全是【最新子场像素】！
+                 * 1) 如果旧像素已经跑出了 4 个最新邻居的 [n_min, n_max] 范围，说明热源正在移动经过此点
+                 * 2) 或者 diff > 0.35℃，说明存在奇偶场偏差或运动滞后
+                 */
+                if (val < n_min || val > n_max) {
+                    // 发生运动撕裂：旧像素严重滞后，高权重采纳最新子场的包夹估计值
+                    float motion_weight = clampf_local((diff - 0.3f) * 0.6f, 0.50f, 0.92f);
+                    dst[idx] = (1.0f - motion_weight) * val + motion_weight * ortho_med;
+                } else if (diff > 0.30f) {
+                    // 处于边缘过渡带或静态微差：平滑融合
+                    dst[idx] = 0.45f * val + 0.55f * ortho_med;
+                } else {
+                    dst[idx] = val;
+                }
+            } else {
+                /*
+                 * 当前点是刚刚测出来的【最新子场像素】：
+                 * 绝不用旧子场去拖慢它！只在静态平坦区（温差很小）微调消除固定棋盘底噪
+                 */
+                if ((n_max - n_min) < 1.0f && diff > 0.25f && diff < 1.0f) {
+                    dst[idx] = 0.80f * val + 0.20f * ortho_med;
+                } else {
+                    dst[idx] = val;
+                }
+            }
+        }
+    }
+}
+
+
 static void temperature_to_norm_u8(const float *src, uint8_t *dst,
                                    float smooth_min_t, float smooth_max_t)
 {
@@ -505,7 +547,7 @@ void ir_camera_task_main(void *pvParameters)
             }
 
             // 2. 棋盘格抑制（输出到 spatial_temp 作为临时缓冲，绝不污染 raw_temp_matrix！）
-            despike_checkerboard(raw_temp_matrix, spatial_temp, MLX_RAW_W, MLX_RAW_H);
+            despike_checkerboard(raw_temp_matrix, spatial_temp, MLX_RAW_W, MLX_RAW_H,subpage);
 
             // 3. 时域响应平滑（输入改用刚去除了棋盘格的 spatial_temp）
             for (int i = 0; i < MLX_RAW_PIXELS; i++) {
@@ -520,10 +562,9 @@ void ir_camera_task_main(void *pvParameters)
                 filtered_temp[i] = alpha * spatial_temp[i] + (1.0f - alpha) * filtered_temp[i];
             }
 
-            // 4. 双边保边与指缝锐化滤波
+            // 4. 双边保边与同场指缝锐化滤波（删掉后面那句会覆盖结果的 spatial_filter_natural）
             spatial_filter_sharp_hand(filtered_temp, spatial_temp, MLX_RAW_W, MLX_RAW_H);
-            spatial_filter_natural(filtered_temp, spatial_temp, MLX_RAW_W, MLX_RAW_H); //[cite: 3]
-
+            
             // 5. 统计极值
             float cur_min = 200.0f;
             float cur_max = -50.0f;
