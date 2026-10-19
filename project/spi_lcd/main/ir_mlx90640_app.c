@@ -21,32 +21,40 @@ static float emissivity = 0.95f;
  * Thermal display tuning
  */
 #define THERMAL_USE_AUTO_RANGE          1
-#define THERMAL_FIXED_MIN_C            24.0f
-#define THERMAL_FIXED_MAX_C            35.0f
-
-/* Very small changes are mostly sensor noise; smooth them strongly. */
-#define TEMP_FILTER_ALPHA_SMALL         0.15f
-#define TEMP_FILTER_ALPHA_MEDIUM        0.50f
-#define TEMP_FILTER_ALPHA_LARGE         0.88f
-#define TEMP_FILTER_MEDIUM_THRESHOLD     0.35f
-#define TEMP_FILTER_LARGE_THRESHOLD      1.90f
-
-/* If auto-range is enabled, it moves very slowly and keeps a wide margin. */
-#define AUTO_RANGE_MIN_SPAN_C            6.0f
-#define AUTO_RANGE_PADDING_C             1.0f
-#define AUTO_RANGE_ALPHA                 0.03f
+#define THERMAL_FIXED_MIN_C             24.0f
+#define THERMAL_FIXED_MAX_C             35.0f
 
 /*
- * 图像方向校准开关（解决竖拍手从左侧横着出来的问题）：
+ * 时域降噪参数（针对 16Hz 下 MLX90640 约 0.5℃ 峰峰值底噪优化）：
+ * - 温差 < 0.65℃ 视为静态热噪声，使用 0.08 强平滑，彻底压住背景噪点翻滚
+ * - 温差在 0.65℃ ~ 2.20℃ 之间线性平滑过渡 alpha，超过 2.20℃ 快速跟手无残影
+ */
+#define TEMP_FILTER_ALPHA_MIN           0.08f
+#define TEMP_FILTER_ALPHA_MAX           0.88f
+#define TEMP_FILTER_NOISE_FLOOR_C       0.65f
+#define TEMP_FILTER_MOTION_SAT_C        2.20f
+
+/*
+ * 自动量程参数：
+ * - AUTO_RANGE_MIN_SPAN_C 设为 10.0℃，防止无热源时把 5℃ 的背景底噪拉伸成满屏花斑
+ * - AUTO_RANGE_HIGHLIGHT_HEADROOM_C 预留 1.3℃ 顶部余量，防止手掌核心区过曝惨白
+ */
+#define AUTO_RANGE_MIN_SPAN_C           10.0f
+#define AUTO_RANGE_LOW_PADDING_C        0.4f
+#define AUTO_RANGE_HIGHLIGHT_HEADROOM_C 1.3f
+#define AUTO_RANGE_ALPHA                0.04f
+
+/*
+ * 图像方向校准开关：
  * IR_ROTATE_90 = 1 : 将传感器坐标系旋转 90°，适配竖屏 PCB 安装 (24宽 -> 240, 32高 -> 280)
- * IR_MIRROR_X  = 0 : 若发现屏幕里左右手方向反了（大拇指和小拇指左右颠倒），在 0 和 1 之间切换
- * IR_MIRROR_Y  = 1 : 默认 1，将原本在屏幕左侧(c=0)的手腕旋转到屏幕底部(y=279)
+ * IR_MIRROR_X  = 0 : 若发现屏幕里左右手方向反了，在 0 和 1 之间切换
+ * IR_MIRROR_Y  = 1 : 默认 1，将手腕旋转到屏幕底部
  */
 #define IR_ROTATE_90                    1
 #define IR_MIRROR_X                     0
 #define IR_MIRROR_Y                     1
 
-/* X/Y 独立全视野定点数缩放步进（不再裁切任何边缘像素） */
+/* X/Y 独立全视野定点数缩放步进 */
 static uint32_t s_scale_x_fp = 0;
 static uint32_t s_scale_y_fp = 0;
 
@@ -65,15 +73,117 @@ lv_img_dsc_t s_thermal_img_dsc = {
 static uint16_t s_ironbow_lut[256];
 const float rate_hz_table[] = {0.5f, 1.0f, 2.0f, 4.0f, 8.0f, 16.0f, 32.0f, 64.0f};
 
-/*
- * 2. 双边保边滤波 + 同子场对角微锐化
- *    - 降噪使用 8 邻域双边加权
- *    - 锐化仅使用 4 个对角邻居（与中心点属于同一 subpage），防止把奇偶场温差当成边缘放大！
- */
-static void spatial_filter_sharp_hand(const float *src, float *dst, int w, int h)
+static inline float clampf_local(float v, float lo, float hi)
 {
-    const float edge_thresh = 1.2f;
-    const float sharpen_gain = 0.20f;
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+/*
+ * 1. 分场时域滤波 + 动态消交错（在 filtered_temp 状态缓冲上直接演进）
+ *    - 阶段 A：仅对本帧新测量的 subpage 像素做连续自适应 IIR 时域降噪
+ *    - 阶段 B：对未测量的另一半旧像素，平时保持不动（杜绝 11Hz 奇偶场闪烁）；
+ *              一旦检测到周围 4 个最新邻居发生运动跨越，立即做运动插值补偿，消除运动棋盘格
+ */
+static void update_temporal_and_deinterlace(const float *raw_src, float *filt_state,
+                                            int w, int h, int subpage)
+{
+    const float inv_motion_span = 1.0f / (TEMP_FILTER_MOTION_SAT_C - TEMP_FILTER_NOISE_FLOOR_C);
+
+    // 阶段 A：仅更新当前 subpage 新采样的 384 个真实像素
+    for (int r = 0; r < h; r++) {
+        for (int c = 0; c < w; c++) {
+            if (((r + c) & 1) != subpage) {
+                continue;
+            }
+            int idx = r * w + c;
+            float raw_v = raw_src[idx];
+            float prev_v = filt_state[idx];
+
+            if (prev_v < 1.0f || !isfinite(prev_v)) {
+                filt_state[idx] = raw_v;
+                continue;
+            }
+
+            float d = fabsf(raw_v - prev_v);
+            float alpha;
+            if (d <= TEMP_FILTER_NOISE_FLOOR_C) {
+                alpha = TEMP_FILTER_ALPHA_MIN;
+            } else if (d >= TEMP_FILTER_MOTION_SAT_C) {
+                alpha = TEMP_FILTER_ALPHA_MAX;
+            } else {
+                float t = (d - TEMP_FILTER_NOISE_FLOOR_C) * inv_motion_span;
+                alpha = TEMP_FILTER_ALPHA_MIN + t * (TEMP_FILTER_ALPHA_MAX - TEMP_FILTER_ALPHA_MIN);
+            }
+
+            filt_state[idx] = prev_v + alpha * (raw_v - prev_v);
+        }
+    }
+
+    // 阶段 B：检查上一场的 384 个旧像素是否因热源运动而滞后
+    for (int r = 0; r < h; r++) {
+        int r_prev = (r > 0) ? (r - 1) : r;
+        int r_next = (r < h - 1) ? (r + 1) : r;
+
+        for (int c = 0; c < w; c++) {
+            if (((r + c) & 1) == subpage) {
+                continue;
+            }
+            int idx = r * w + c;
+            float val = filt_state[idx];
+
+            int c_prev = (c > 0) ? (c - 1) : c;
+            int c_next = (c < w - 1) ? (c + 1) : c;
+
+            // 这 4 个正交邻居全都是刚刚在阶段 A 更新完的【最新子场像素】
+            float n0 = filt_state[r_prev * w + c];
+            float n1 = filt_state[r_next * w + c];
+            float n2 = filt_state[r * w + c_prev];
+            float n3 = filt_state[r * w + c_next];
+
+            if (val < 1.0f || !isfinite(val)) {
+                filt_state[idx] = 0.25f * (n0 + n1 + n2 + n3);
+                continue;
+            }
+
+            // 快速排序网络: n0 <= n1 <= n2 <= n3
+            if (n0 > n1) { float t = n0; n0 = n1; n1 = t; }
+            if (n2 > n3) { float t = n2; n2 = n3; n3 = t; }
+            if (n0 > n2) { float t = n0; n0 = n2; n2 = t; }
+            if (n1 > n3) { float t = n1; n1 = n3; n3 = t; }
+            if (n1 > n2) { float t = n1; n1 = n2; n2 = t; }
+
+            float ortho_med = 0.5f * (n1 + n2);
+
+            // 计算旧像素跑出最新邻居中间区间 [n1, n2] 的越界量
+            float out_of_bounds = 0.0f;
+            if (val < n1) {
+                out_of_bounds = n1 - val;
+            } else if (val > n2) {
+                out_of_bounds = val - n2;
+            }
+
+            // 只有当越界量超过静态噪声阈值 (0.55℃) 时，才判定为运动撕裂并拉向最新场中值
+            // 静态时完全不触碰旧场像素，彻底杜绝 11Hz 奇偶场交替闪烁！
+            if (out_of_bounds > 0.55f) {
+                float m_weight = clampf_local((out_of_bounds - 0.55f) * 0.65f, 0.25f, 0.92f);
+                filt_state[idx] = val + m_weight * (ortho_med - val);
+            }
+        }
+    }
+}
+
+/*
+ * 2. 对称式 3x3 双边保边平滑滤波（消除空间颗粒感与静态奇偶场微差，不放大噪声）
+ *    - 对所有像素一视同仁，消除固定图案噪声 (FPN)
+ *    - 温差 < 1.8℃ 的区域（手掌内部、背景内部）强力平滑磨皮
+ *    - 温差 >= 1.8℃ 的区域（手指边缘、指缝）自动截断权重，保持轮廓锐利
+ */
+static void spatial_bilateral_denoise(const float *src, float *dst, int w, int h)
+{
+    const float edge_thresh = 1.8f;
+    const float inv_edge_thresh = 1.0f / edge_thresh;
 
     for (int r = 0; r < h; r++) {
         int r_prev = (r > 0) ? (r - 1) : r;
@@ -84,10 +194,8 @@ static void spatial_filter_sharp_hand(const float *src, float *dst, int w, int h
             int c_next = (c < w - 1) ? (c + 1) : c;
 
             float center = src[r * w + c];
-            float sum_smooth = center * 6.0f;
-            float w_total = 6.0f;
 
-            // 正交 4 邻域（异子场）
+            // 正交 4 邻域
             float ortho[4] = {
                 src[r_prev * w + c],
                 src[r_next * w + c],
@@ -95,7 +203,7 @@ static void spatial_filter_sharp_hand(const float *src, float *dst, int w, int h
                 src[r * w + c_next]
             };
 
-            // 对角 4 邻域（同子场！）
+            // 对角 4 邻域
             float diag[4] = {
                 src[r_prev * w + c_prev],
                 src[r_prev * w + c_next],
@@ -103,66 +211,37 @@ static void spatial_filter_sharp_hand(const float *src, float *dst, int w, int h
                 src[r_next * w + c_next]
             };
 
+            // 先对称消除中心点与正交邻域的静态奇偶微差
+            float ortho_avg = 0.25f * (ortho[0] + ortho[1] + ortho[2] + ortho[3]);
+            if (fabsf(center - ortho_avg) < 0.80f) {
+                center = 0.70f * center + 0.30f * ortho_avg;
+            }
+
+            float sum_smooth = center * 4.0f;
+            float w_total = 4.0f;
+
             for (int i = 0; i < 4; i++) {
                 float d_o = fabsf(ortho[i] - center);
                 if (d_o < edge_thresh) {
-                    float w_o = 1.5f * (1.0f - d_o / edge_thresh);
+                    float t = 1.0f - d_o * inv_edge_thresh;
+                    float w_o = 2.0f * t * t;
                     sum_smooth += ortho[i] * w_o;
                     w_total += w_o;
                 }
+
                 float d_d = fabsf(diag[i] - center);
                 if (d_d < edge_thresh) {
-                    float w_d = 0.75f * (1.0f - d_d / edge_thresh);
+                    float t = 1.0f - d_d * inv_edge_thresh;
+                    float w_d = 1.0f * t * t;
                     sum_smooth += diag[i] * w_d;
                     w_total += w_d;
                 }
             }
 
-            float base_val = sum_smooth / w_total;
-
-            // 关键：用【同子场】的 4 个对角邻居均值计算高频分量，只锐化真实指缝，绝不放大棋盘格！
-            float diag_avg = 0.25f * (diag[0] + diag[1] + diag[2] + diag[3]);
-            float high_freq = center - diag_avg;
-            if (fabsf(high_freq) > 0.5f) {
-                base_val += high_freq * sharpen_gain;
-            }
-
-            dst[r * w + c] = base_val;
+            dst[r * w + c] = sum_smooth / w_total;
         }
     }
 }
-
-/*
- * Natural spatial filter.
- * Center 8, 4-neighbor 1.5, diagonal 0.5 => total weight 16.
- */
-static void spatial_filter_natural(const float *src, float *dst, int w, int h)
-{
-    for (int r = 0; r < h; r++) {
-        int r_prev = (r > 0) ? (r - 1) : r;
-        int r_next = (r < h - 1) ? (r + 1) : r;
-
-        for (int c = 0; c < w; c++) {
-            /* Fixed boundary handling: never use c-1 when c==0,
-             * and never use c-1 as a fake right neighbor at the last column. */
-            int c_prev = (c > 0) ? (c - 1) : c;
-            int c_next = (c < w - 1) ? (c + 1) : c;
-
-            float sum = src[r * w + c] * 12.0f
-                    + (src[r_prev * w + c]
-                    + src[r_next * w + c]
-                    + src[r * w + c_prev]
-                    + src[r * w + c_next]) * 0.75f
-                    + (src[r_prev * w + c_prev]
-                    + src[r_prev * w + c_next]
-                    + src[r_next * w + c_prev]
-                    + src[r_next * w + c_next]) * 0.25f;
-
-            dst[r * w + c] = sum * (1.0f / 16.0f);
-        }
-    }
-}
-
 
 esp_err_t ir_camera_app_init(void)
 {
@@ -186,18 +265,15 @@ esp_err_t ir_camera_app_init(void)
         s_display_buf[1] = s_display_buf[0];
     }
 
-    // 将两个显存彻底清零为纯黑，防止开机雪花杂波
     memset(s_display_buf[0], 0, buf_size);
     if (s_display_buf[1] != s_display_buf[0]) {
         memset(s_display_buf[1], 0, buf_size);
     }
 
 #if IR_ROTATE_90
-    // 旋转 90° 后：传感器 24 行对应屏幕 240 宽，32 列对应屏幕 280 高
     s_scale_x_fp = ((MLX_RAW_H - 1) << 16) / (MLX_INTERP_W - 1);
     s_scale_y_fp = ((MLX_RAW_W - 1) << 16) / (MLX_INTERP_H - 1);
 #else
-    // 未旋转时：传感器 32 列完整对应屏幕 240 宽（放大 7.5 倍，不裁切），24 行对应 280 高
     s_scale_x_fp = ((MLX_RAW_W - 1) << 16) / (MLX_INTERP_W - 1);
     s_scale_y_fp = ((MLX_RAW_H - 1) << 16) / (MLX_INTERP_H - 1);
 #endif
@@ -238,10 +314,6 @@ static void init_ironbow_lut(void)
     }
 }
 
-/*
- * 将传感器原始行列 (raw_r, raw_c) 转换为旋转/镜像后的屏幕像素坐标 (px_x, px_y)
- * 确保 MAX / MIN 菱形准星和浮动标签与手部热像位置 100% 同步
- */
 static inline void raw_rc_to_screen_xy(int raw_r, int raw_c, int *px_x, int *px_y)
 {
 #if IR_ROTATE_90
@@ -264,9 +336,6 @@ static inline void raw_rc_to_screen_xy(int raw_r, int raw_c, int *px_x, int *px_
     *px_y = y;
 }
 
-/*
- * 全视野无裁切双线性插值（内置 90° 旋转与 X/Y 镜像校准）
- */
 static void bilinear_scale_fullscreen_1to1(const uint8_t *src, int src_w, int src_h,
                                            uint16_t *dst, int dst_w, int dst_h,
                                            const uint16_t *lut)
@@ -276,7 +345,6 @@ static void bilinear_scale_fullscreen_1to1(const uint8_t *src, int src_w, int sr
         uint16_t *dst_row = &dst[y * dst_w];
 
 #if IR_ROTATE_90
-        // 屏幕 Y 轴对应传感器列 c (0..31)
         uint32_t c_fp = eff_y * s_scale_y_fp;
         int c0 = c_fp >> 16;
         int c1 = (c0 < src_w - 1) ? (c0 + 1) : c0;
@@ -284,7 +352,6 @@ static void bilinear_scale_fullscreen_1to1(const uint8_t *src, int src_w, int sr
         uint32_t c_diff_inv = 65536U - c_diff;
 
         for (int x = 0; x < dst_w; x++) {
-            // 屏幕 X 轴对应传感器行 r (0..23)
             int eff_x = IR_MIRROR_X ? (dst_w - 1 - x) : x;
             uint32_t r_fp = eff_x * s_scale_x_fp;
             int r0 = r_fp >> 16;
@@ -303,7 +370,6 @@ static void bilinear_scale_fullscreen_1to1(const uint8_t *src, int src_w, int sr
             dst_row[x] = lut[val];
         }
 #else
-        // 未旋转模式：屏幕 Y 轴对应传感器行 r (0..23)，屏幕 X 轴对应列 c (0..31)
         uint32_t r_fp = eff_y * s_scale_y_fp;
         int r0 = r_fp >> 16;
         int r1 = (r0 < src_h - 1) ? (r0 + 1) : r0;
@@ -356,83 +422,6 @@ static inline void draw_diamond_marker(uint16_t *buf, int cx, int cy,
     }
 }
 
-static inline float clampf_local(float v, float lo, float hi)
-{
-    if (v < lo) return lo;
-    if (v > hi) return hi;
-    return v;
-}
-
-/*
- * 1. 子场相位感知的动态消交错滤波（彻底解决运动热源棋盘格撕裂）
- *    - 新子场像素 ((r + c) & 1) == subpage : 保持最新真实测量值，仅在平坦区消除静态微差
- *    - 旧子场像素 ((r + c) & 1) != subpage : 其上下左右 4 个邻居全是最新的！一旦发生运动温差，立即向最新场对齐
- */
-static void despike_checkerboard(const float *src, float *dst, int w, int h, int subpage)
-{
-    for (int r = 0; r < h; r++) {
-        int r_prev = (r > 0) ? (r - 1) : r;
-        int r_next = (r < h - 1) ? (r + 1) : r;
-
-        for (int c = 0; c < w; c++) {
-            int idx = r * w + c;
-            float val = src[idx];
-
-            int c_prev = (c > 0) ? (c - 1) : c;
-            int c_next = (c < w - 1) ? (c + 1) : c;
-
-            // 上下左右四个正交邻居（在棋盘格模式下，它们的奇偶性与当前点完全相反）
-            float n0 = src[r_prev * w + c];
-            float n1 = src[r_next * w + c];
-            float n2 = src[r * w + c_prev];
-            float n3 = src[r * w + c_next];
-
-            // 对 4 个正交邻居做快速排序网络，取中间两个值的均值（抗边缘模糊的中值估计）
-            if (n0 > n1) { float t = n0; n0 = n1; n1 = t; }
-            if (n2 > n3) { float t = n2; n2 = n3; n3 = t; }
-            if (n0 > n2) { float t = n0; n0 = n2; n2 = t; }
-            if (n1 > n3) { float t = n1; n1 = n3; n3 = t; }
-            if (n1 > n2) { float t = n1; n1 = n2; n2 = t; }
-
-            float n_min = n0;
-            float n_max = n3;
-            float ortho_med = 0.5f * (n1 + n2); // 四邻域中值（比简单平均更能保护手指边界）
-            float diff = fabsf(val - ortho_med);
-
-            bool is_fresh_pixel = (((r + c) & 1) == subpage);
-
-            if (!is_fresh_pixel) {
-                /*
-                 * 当前点是上一帧遗留的【旧子场像素】，而包围它的 4 个正交邻居全是【最新子场像素】！
-                 * 1) 如果旧像素已经跑出了 4 个最新邻居的 [n_min, n_max] 范围，说明热源正在移动经过此点
-                 * 2) 或者 diff > 0.35℃，说明存在奇偶场偏差或运动滞后
-                 */
-                if (val < n_min || val > n_max) {
-                    // 发生运动撕裂：旧像素严重滞后，高权重采纳最新子场的包夹估计值
-                    float motion_weight = clampf_local((diff - 0.3f) * 0.6f, 0.50f, 0.92f);
-                    dst[idx] = (1.0f - motion_weight) * val + motion_weight * ortho_med;
-                } else if (diff > 0.30f) {
-                    // 处于边缘过渡带或静态微差：平滑融合
-                    dst[idx] = 0.45f * val + 0.55f * ortho_med;
-                } else {
-                    dst[idx] = val;
-                }
-            } else {
-                /*
-                 * 当前点是刚刚测出来的【最新子场像素】：
-                 * 绝不用旧子场去拖慢它！只在静态平坦区（温差很小）微调消除固定棋盘底噪
-                 */
-                if ((n_max - n_min) < 1.0f && diff > 0.25f && diff < 1.0f) {
-                    dst[idx] = 0.80f * val + 0.20f * ortho_med;
-                } else {
-                    dst[idx] = val;
-                }
-            }
-        }
-    }
-}
-
-
 static void temperature_to_norm_u8(const float *src, uint8_t *dst,
                                    float smooth_min_t, float smooth_max_t)
 {
@@ -450,9 +439,10 @@ static void temperature_to_norm_u8(const float *src, uint8_t *dst,
         float norm = (src[i] - map_min) * range_inv;
         norm = clampf_local(norm, 0.0f, 1.0f);
 
-        // Gamma = 1.5 非线性对比度拉伸 (norm * sqrt(norm))
-        // 压低中低温过渡带（指缝热辐射区），突出高温主体（手指核心区），消除趾蹼粘连感
-        norm = norm * sqrtf(norm);
+        // 温和对比度曲线 (0.65 * norm^1.5 + 0.35 * norm)：
+        // 既压低背景暗部噪点，又保留手掌高温区的细节层次，防止手心一片惨白过曝
+        float gamma_15 = norm * sqrtf(norm);
+        norm = 0.65f * gamma_15 + 0.35f * norm;
 
         dst[i] = (uint8_t)(norm * 255.0f + 0.5f);
     }
@@ -493,7 +483,6 @@ void ir_camera_task_main(void *pvParameters)
     free(eerom_ir_data);
     eerom_ir_data = NULL;
 
-    // 开机丢弃前 4 帧哑数据，等待传感器内部硬件 PTAT 和 VDD 稳定
     ESP_LOGI(TAG, "Warming up MLX90640 sensor...");
     for (int i = 0; i < 4; i++) {
         MLX90640_GetFrameData(MLX90640_ADDR, ir_frame_data);
@@ -513,7 +502,6 @@ void ir_camera_task_main(void *pvParameters)
     float smooth_max_t = THERMAL_FIXED_MAX_C;
     bool range_initialized = false;
 
-    // 记录两个子场是否各自都完成过至少一次测量
     bool subpage_init[2] = {false, false};
 
     while (1) {
@@ -528,11 +516,10 @@ void ir_camera_task_main(void *pvParameters)
 
             float ta = MLX90640_GetTa(ir_frame_data, mlx_params);
 
-            // 1. 官方原生计算：每次只增量更新当前 subpage 的 384 个点，另一半保留上一帧的真实点
+            // 1. 官方原生计算：增量更新当前 subpage 的 384 个点
             MLX90640_CalculateTo(ir_frame_data, mlx_params,
                                  emissivity, ta - TA_SHIFT, raw_temp_matrix);
 
-            // 调用官方坏点校准算法
             int mode = (ir_frame_data[832] & MLX90640_CTRL_MEAS_MODE_MASK) >> 5;
             MLX90640_BadPixelsCorrection(mlx_params->brokenPixels, raw_temp_matrix, mode, mlx_params);
             MLX90640_BadPixelsCorrection(mlx_params->outlierPixels, raw_temp_matrix, mode, mlx_params);
@@ -540,32 +527,20 @@ void ir_camera_task_main(void *pvParameters)
             subpage_init[subpage] = true;
             frame_count++;
 
-            // 开机首轮：必须等 0 和 1 两个场全部采过一遍（确保 768 个点都有初始测量值）才送显
             if (!subpage_init[0] || !subpage_init[1]) {
+                // 首轮先将 raw_temp_matrix 同步到 filtered_temp
+                memcpy(filtered_temp, raw_temp_matrix, MLX_RAW_PIXELS * sizeof(float));
                 vTaskDelay(pdMS_TO_TICKS(2));
                 continue;
             }
 
-            // 2. 棋盘格抑制（输出到 spatial_temp 作为临时缓冲，绝不污染 raw_temp_matrix！）
-            despike_checkerboard(raw_temp_matrix, spatial_temp, MLX_RAW_W, MLX_RAW_H,subpage);
+            // 2. 分场时域平滑 + 运动防撕裂（直接更新 filtered_temp，消除 11Hz 奇偶场闪烁与运动棋盘格）
+            update_temporal_and_deinterlace(raw_temp_matrix, filtered_temp, MLX_RAW_W, MLX_RAW_H, subpage);
 
-            // 3. 时域响应平滑（输入改用刚去除了棋盘格的 spatial_temp）
-            for (int i = 0; i < MLX_RAW_PIXELS; i++) {
-                if (filtered_temp[i] < 1.0f || !isfinite(filtered_temp[i])) {
-                    filtered_temp[i] = spatial_temp[i];
-                    continue;
-                }
-                float d = fabsf(spatial_temp[i] - filtered_temp[i]);
-                float alpha = (d > TEMP_FILTER_LARGE_THRESHOLD)  ? TEMP_FILTER_ALPHA_LARGE :
-                              (d > TEMP_FILTER_MEDIUM_THRESHOLD) ? TEMP_FILTER_ALPHA_MEDIUM :
-                                                                   TEMP_FILTER_ALPHA_SMALL;
-                filtered_temp[i] = alpha * spatial_temp[i] + (1.0f - alpha) * filtered_temp[i];
-            }
+            // 3. 对称式 3x3 双边保边滤波（磨皮降噪，保留手指边缘）
+            spatial_bilateral_denoise(filtered_temp, spatial_temp, MLX_RAW_W, MLX_RAW_H);
 
-            // 4. 双边保边与同场指缝锐化滤波（删掉后面那句会覆盖结果的 spatial_filter_natural）
-            spatial_filter_sharp_hand(filtered_temp, spatial_temp, MLX_RAW_W, MLX_RAW_H);
-            
-            // 5. 统计极值
+            // 4. 统计极值
             float cur_min = 200.0f;
             float cur_max = -50.0f;
             int max_idx = 0;
@@ -587,13 +562,14 @@ void ir_camera_task_main(void *pvParameters)
             }
 
 #if THERMAL_USE_AUTO_RANGE
-            float target_min = cur_min - 0.5f;
-            float target_max = cur_max + 0.5f;
+            float target_min = cur_min - AUTO_RANGE_LOW_PADDING_C;
+            float target_max = cur_max + AUTO_RANGE_HIGHLIGHT_HEADROOM_C;
+
+            // 当画面中没有高温物体（温差小于 10℃）时，优先向下扩展量程上限，将背景固定在深蓝暗部
             if ((target_max - target_min) < AUTO_RANGE_MIN_SPAN_C) {
-                float mid = 0.5f * (target_max + target_min);
-                target_min = mid - 0.5f * AUTO_RANGE_MIN_SPAN_C;
-                target_max = mid + 0.5f * AUTO_RANGE_MIN_SPAN_C;
+                target_max = target_min + AUTO_RANGE_MIN_SPAN_C;
             }
+
             if (!range_initialized) {
                 smooth_min_t = target_min;
                 smooth_max_t = target_max;
@@ -604,7 +580,7 @@ void ir_camera_task_main(void *pvParameters)
             }
 #endif
 
-            // 6. 帧率统计与 HUD 字符串格式化
+            // 5. 帧率统计与 HUD 字符串格式化
             int64_t now_us = esp_timer_get_time();
             int64_t diff_us = now_us - last_time_us;
             if (diff_us >= 1000000) {
@@ -621,7 +597,7 @@ void ir_camera_task_main(void *pvParameters)
             snprintf(text_max_tag, sizeof(text_max_tag), "MAX %.1f", cur_max);
             snprintf(text_min_tag, sizeof(text_min_tag), "MIN %.1f", cur_min);
 
-            // 7. 映射并进行双线性插值送显
+            // 6. 映射并进行双线性插值送显
             if (valid_pts > 400) {
                 temperature_to_norm_u8(spatial_temp, norm_matrix, smooth_min_t, smooth_max_t);
                 uint16_t *cur_write_buf = s_display_buf[s_back_idx];
@@ -631,7 +607,6 @@ void ir_camera_task_main(void *pvParameters)
                     cur_write_buf, MLX_INTERP_W, MLX_INTERP_H,
                     s_ironbow_lut);
 
-                // 【已修改】：计算准星位置并绘制标记（自动跟随旋转与镜像设置）
                 int max_px_x, max_px_y, min_px_x, min_px_y;
                 raw_rc_to_screen_xy(max_idx / MLX_RAW_W, max_idx % MLX_RAW_W, &max_px_x, &max_px_y);
                 raw_rc_to_screen_xy(min_idx / MLX_RAW_W, min_idx % MLX_RAW_W, &min_px_x, &min_px_y);
@@ -640,7 +615,7 @@ void ir_camera_task_main(void *pvParameters)
                 draw_diamond_marker(cur_write_buf, min_px_x, min_px_y, MLX_INTERP_W, MLX_INTERP_H, 5, 0x07FF);
                 draw_diamond_marker(cur_write_buf, MLX_INTERP_W / 2, MLX_INTERP_H / 2, MLX_INTERP_W, MLX_INTERP_H, 3, 0xFFFF);
 
-                // 8. 刷新到 LVGL 显存
+                // 7. 刷新到 LVGL 显存
                 if (example_lvgl_lock(100)) {
                     s_thermal_img_dsc.data = (const uint8_t *)cur_write_buf;
                     if (img_thermal) {
