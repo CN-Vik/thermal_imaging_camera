@@ -29,10 +29,13 @@ static float emissivity = 0.95f;
  * - 温差 < 0.65℃ 视为静态热噪声，使用 0.08 强平滑，彻底压住背景噪点翻滚
  * - 温差在 0.65℃ ~ 2.20℃ 之间线性平滑过渡 alpha，超过 2.20℃ 快速跟手无残影
  */
-#define TEMP_FILTER_ALPHA_MIN           0.08f
-#define TEMP_FILTER_ALPHA_MAX           0.88f
-#define TEMP_FILTER_NOISE_FLOOR_C       0.65f
+#define TEMP_FILTER_ALPHA_MIN           0.05f
+#define TEMP_FILTER_ALPHA_MAX           0.85f
+#define TEMP_FILTER_NOISE_FLOOR_C       0.75f
 #define TEMP_FILTER_MOTION_SAT_C        2.20f
+
+/* 3x3 中值异常点抑制阈值；降低会更积极地抑制孤立噪点 */
+#define THERMAL_OUTLIER_THRESH_C        1.0f
 
 /*
  * 自动量程参数：
@@ -43,6 +46,8 @@ static float emissivity = 0.95f;
 #define AUTO_RANGE_LOW_PADDING_C        0.4f
 #define AUTO_RANGE_HIGHLIGHT_HEADROOM_C 1.3f
 #define AUTO_RANGE_ALPHA                0.04f
+#define THERMAL_PERCENTILE_LOW           5
+#define THERMAL_PERCENTILE_HIGH          95
 
 /*
  * 图像方向校准开关：
@@ -175,7 +180,75 @@ static void update_temporal_and_deinterlace(const float *raw_src, float *filt_st
 }
 
 /*
- * 2. 对称式 3x3 双边保边平滑滤波（消除空间颗粒感与静态奇偶场微差，不放大噪声）
+ * 2. 3x3 鲁棒中值异常点抑制
+ * 仅对明显偏离邻域中值的孤立像素做部分修正，尽量保留连续的手指边缘。
+ * src/dst 必须是不同缓冲区。
+ */
+static void spatial_median_outlier_filter(const float *src, float *dst, int w, int h)
+{
+    for (int r = 0; r < h; r++) {
+        for (int c = 0; c < w; c++) {
+            float v[9];
+            int n = 0;
+
+            for (int dy = -1; dy <= 1; dy++) {
+                int rr = r + dy;
+                if (rr < 0) rr = 0;
+                if (rr >= h) rr = h - 1;
+
+                for (int dx = -1; dx <= 1; dx++) {
+                    int cc = c + dx;
+                    if (cc < 0) cc = 0;
+                    if (cc >= w) cc = w - 1;
+
+                    float t = src[rr * w + cc];
+                    if (isfinite(t) && t > 1.0f && t < 200.0f) {
+                        v[n++] = t;
+                    }
+                }
+            }
+
+            int idx = r * w + c;
+            float center = src[idx];
+            if (!isfinite(center) || center <= 1.0f || center >= 200.0f || n < 5) {
+                dst[idx] = center;
+                continue;
+            }
+
+            // 9 个以内元素，插入排序开销很小。
+            for (int i = 1; i < n; i++) {
+                float key = v[i];
+                int j = i - 1;
+                while (j >= 0 && v[j] > key) {
+                    v[j + 1] = v[j];
+                    j--;
+                }
+                v[j + 1] = key;
+            }
+
+            float median = v[n / 2];
+            float diff = fabsf(center - median);
+            if (diff > THERMAL_OUTLIER_THRESH_C) {
+                float strength = clampf_local(
+                    (diff - THERMAL_OUTLIER_THRESH_C) / 1.5f,
+                    0.0f, 0.65f);
+                dst[idx] = center + strength * (median - center);
+            } else {
+                dst[idx] = center;
+            }
+        }
+    }
+}
+
+static int compare_float_ascending(const void *a, const void *b)
+{
+    float x = *(const float *)a;
+    float y = *(const float *)b;
+    return (x > y) - (x < y);
+}
+
+/*
+ * 3. 对称式 3x3 双边保边平滑滤波（消除空间颗粒感与静态奇偶场微差，不放大噪声）
  *    - 对所有像素一视同仁，消除固定图案噪声 (FPN)
  *    - 温差 < 1.8℃ 的区域（手掌内部、背景内部）强力平滑磨皮
  *    - 温差 >= 1.8℃ 的区域（手指边缘、指缝）自动截断权重，保持轮廓锐利
@@ -468,11 +541,12 @@ void ir_camera_task_main(void *pvParameters)
     paramsMLX90640 *mlx_params = (paramsMLX90640 *)calloc(1, sizeof(paramsMLX90640));
 
     float *filtered_temp = (float *)calloc(MLX_RAW_PIXELS, sizeof(float));
+    float *median_temp   = (float *)calloc(MLX_RAW_PIXELS, sizeof(float));
     float *spatial_temp  = (float *)calloc(MLX_RAW_PIXELS, sizeof(float));
     uint8_t *norm_matrix = (uint8_t *)calloc(MLX_RAW_PIXELS, sizeof(uint8_t));
 
     if (!ir_frame_data || !eerom_ir_data || !raw_temp_matrix || !mlx_params ||
-        !filtered_temp || !spatial_temp || !norm_matrix) {
+        !filtered_temp || !median_temp || !spatial_temp || !norm_matrix) {
         ESP_LOGE(TAG, "Critical: calloc failed, Out of memory!");
         vTaskDelete(NULL);
         return;
@@ -534,11 +608,17 @@ void ir_camera_task_main(void *pvParameters)
                 continue;
             }
 
-            // 2. 分场时域平滑 + 运动防撕裂（直接更新 filtered_temp，消除 11Hz 奇偶场闪烁与运动棋盘格）
-            update_temporal_and_deinterlace(raw_temp_matrix, filtered_temp, MLX_RAW_W, MLX_RAW_H, subpage);
+            // 2. 分场时域平滑 + 运动补偿
+            update_temporal_and_deinterlace(raw_temp_matrix, filtered_temp,
+                                            MLX_RAW_W, MLX_RAW_H, subpage);
 
-            // 3. 对称式 3x3 双边保边滤波（磨皮降噪，保留手指边缘）
-            spatial_bilateral_denoise(filtered_temp, spatial_temp, MLX_RAW_W, MLX_RAW_H);
+            // 3. 中值异常点抑制：去除孤立温度跳点，尽量保留边缘
+            spatial_median_outlier_filter(filtered_temp, median_temp,
+                                          MLX_RAW_W, MLX_RAW_H);
+
+            // 4. 双边保边平滑：继续压制背景颗粒，不直接模糊强温差边缘
+            spatial_bilateral_denoise(median_temp, spatial_temp,
+                                      MLX_RAW_W, MLX_RAW_H);
 
             // 4. 统计极值
             float cur_min = 200.0f;
@@ -562,8 +642,26 @@ void ir_camera_task_main(void *pvParameters)
             }
 
 #if THERMAL_USE_AUTO_RANGE
-            float target_min = cur_min - AUTO_RANGE_LOW_PADDING_C;
-            float target_max = cur_max + AUTO_RANGE_HIGHLIGHT_HEADROOM_C;
+            // 用 5%/95% 分位数决定颜色映射范围，避免单个异常像素拉伸整幅图像。
+            // median_temp 可复用为排序工作区；spatial_temp 保留原始滤波图用于显示和测温。
+            int n_valid = 0;
+            for (int i = 0; i < MLX_RAW_PIXELS; i++) {
+                float t = spatial_temp[i];
+                if (isfinite(t) && t > 1.0f && t < 200.0f) {
+                    median_temp[n_valid++] = t;
+                }
+            }
+
+            float robust_min = cur_min;
+            float robust_max = cur_max;
+            if (n_valid >= 100) {
+                qsort(median_temp, n_valid, sizeof(float), compare_float_ascending);
+                robust_min = median_temp[(n_valid - 1) * THERMAL_PERCENTILE_LOW / 100];
+                robust_max = median_temp[(n_valid - 1) * THERMAL_PERCENTILE_HIGH / 100];
+            }
+
+            float target_min = robust_min - AUTO_RANGE_LOW_PADDING_C;
+            float target_max = robust_max + AUTO_RANGE_HIGHLIGHT_HEADROOM_C;
 
             // 当画面中没有高温物体（温差小于 10℃）时，优先向下扩展量程上限，将背景固定在深蓝暗部
             if ((target_max - target_min) < AUTO_RANGE_MIN_SPAN_C) {
