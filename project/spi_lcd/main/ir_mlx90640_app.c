@@ -20,8 +20,8 @@ static float emissivity = 0.95f;
 /*
  * Thermal display tuning
  */
-#define THERMAL_USE_AUTO_RANGE          1
-#define THERMAL_FIXED_MIN_C             23.0f
+#define THERMAL_USE_AUTO_RANGE          0
+#define THERMAL_FIXED_MIN_C             20.0f
 #define THERMAL_FIXED_MAX_C             35.0f
 
 /*
