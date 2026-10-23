@@ -25,20 +25,18 @@ static float emissivity = 0.95f;
 #define THERMAL_FIXED_MAX_C             35.0f
 
 /*
- * 时域降噪参数（针对 16Hz 下 MLX90640 约 0.5℃ 峰峰值底噪优化）：
- * - 温差 < 0.65℃ 视为静态热噪声，使用 0.08 强平滑，彻底压住背景噪点翻滚
- * - 温差在 0.65℃ ~ 2.20℃ 之间线性平滑过渡 alpha，超过 2.20℃ 快速跟手无残影
+ * 时域降噪参数（针对 16Hz 下 MLX90640 底噪优化）：
  */
-#define TEMP_FILTER_ALPHA_MIN           0.05f
+#define TEMP_FILTER_ALPHA_MIN           0.04f
 #define TEMP_FILTER_ALPHA_MAX           0.85f
 #define TEMP_FILTER_NOISE_FLOOR_C       0.75f
 #define TEMP_FILTER_MOTION_SAT_C        2.20f
 
-/* 3x3 中值异常点抑制阈值；降低会更积极地抑制孤立噪点 */
-#define THERMAL_OUTLIER_THRESH_C        1.0f
+/* 3x3 孤立噪点抑制阈值：平坦背景区使用 0.58℃，手指边缘区自动切换为二阶连通保护 */
+#define THERMAL_OUTLIER_THRESH_C        0.58f
 
 /*
- * 自动量程参数：
+ * 自动量程参数（完全保持原版参数）：
  * - AUTO_RANGE_MIN_SPAN_C 设为 10.0℃，防止无热源时把 5℃ 的背景底噪拉伸成满屏花斑
  * - AUTO_RANGE_HIGHLIGHT_HEADROOM_C 预留 1.3℃ 顶部余量，防止手掌核心区过曝惨白
  */
@@ -86,10 +84,12 @@ static inline float clampf_local(float v, float lo, float hi)
 }
 
 /*
- * 1. 分场时域滤波 + 动态消交错（在 filtered_temp 状态缓冲上直接演进）
+ * 1. 分场时域滤波 + 防趾蹼动态消交错
  *    - 阶段 A：仅对本帧新测量的 subpage 像素做连续自适应 IIR 时域降噪
- *    - 阶段 B：对未测量的另一半旧像素，平时保持不动（杜绝 11Hz 奇偶场闪烁）；
- *              一旦检测到周围 4 个最新邻居发生运动跨越，立即做运动插值补偿，消除运动棋盘格
+ *    - 阶段 B：对未测量的另一半旧像素：
+ *              * 平坦背景区（正交极差 < 0.90℃）：用 [n1, n2] 区间抑制奇偶场棋盘格噪点
+ *              * 手指边缘与指根区（正交极差 >= 0.90℃）：改用 [n0, n3] 极值区间判断，
+ *                防止指根处（3 个高温邻居 + 1 个低温指缝邻居）把低温指缝拉成高温造成“趾蹼粘连”
  */
 static void update_temporal_and_deinterlace(const float *raw_src, float *filt_state,
                                             int w, int h, int subpage)
@@ -160,19 +160,24 @@ static void update_temporal_and_deinterlace(const float *raw_src, float *filt_st
             if (n1 > n2) { float t = n1; n1 = n2; n2 = t; }
 
             float ortho_med = 0.5f * (n1 + n2);
+            float ortho_span = n3 - n0;
 
-            // 计算旧像素跑出最新邻居中间区间 [n1, n2] 的越界量
+            // 关键区分：
+            // - 若正交 4 邻居存在明显温差（ortho_span >= 0.90℃，如指根夹角或手指边缘），
+            //   使用外部极值 [n0, n3] 作为越界基准，只要有 1 个方向连着低温指缝 (n0)，就绝不把指缝拉成高温！
+            // - 若正交 4 邻居平坦（ortho_span < 0.90℃，如背景区），使用内部区间 [n1, n2] 消除奇偶噪点。
+            float lo_ref = (ortho_span >= 0.90f) ? n0 : n1;
+            float hi_ref = (ortho_span >= 0.90f) ? n3 : n2;
+
             float out_of_bounds = 0.0f;
-            if (val < n1) {
-                out_of_bounds = n1 - val;
-            } else if (val > n2) {
-                out_of_bounds = val - n2;
+            if (val < lo_ref) {
+                out_of_bounds = lo_ref - val;
+            } else if (val > hi_ref) {
+                out_of_bounds = val - hi_ref;
             }
 
-            // 只有当越界量超过静态噪声阈值 (0.55℃) 时，才判定为运动撕裂并拉向最新场中值
-            // 静态时完全不触碰旧场像素，彻底杜绝 11Hz 奇偶场交替闪烁！
-            if (out_of_bounds > 0.55f) {
-                float m_weight = clampf_local((out_of_bounds - 0.55f) * 0.65f, 0.25f, 0.92f);
+            if (out_of_bounds > 0.50f) {
+                float m_weight = clampf_local((out_of_bounds - 0.50f) * 0.65f, 0.25f, 0.90f);
                 filt_state[idx] = val + m_weight * (ortho_med - val);
             }
         }
@@ -180,9 +185,11 @@ static void update_temporal_and_deinterlace(const float *raw_src, float *filt_st
 }
 
 /*
- * 2. 3x3 鲁棒中值异常点抑制
- * 仅对明显偏离邻域中值的孤立像素做部分修正，尽量保留连续的手指边缘。
- * src/dst 必须是不同缓冲区。
+ * 2. 3x3 鲁棒中值异常点抑制（带指缝/指尖连通性保护）
+ *    - 在平坦区（v[n-2] - v[1] < 1.5℃）：与中位数 v[n/2] 比较，积极滤除背景噪点
+ *    - 在手指/指缝结构区（v[n-2] - v[1] >= 1.5℃）：1 像素宽的指缝在 3x3 窗口内只有 2~3 个低温点，
+ *      中位数 v[4] 必然是两侧的高温手指！此时改为与 [v[1], v[n-2]] 比较，
+ *      确保只要指缝或指尖有至少 2 个像素相连，就绝不会被中值滤波填平或削断。
  */
 static void spatial_median_outlier_filter(const float *src, float *dst, int w, int h)
 {
@@ -227,14 +234,31 @@ static void spatial_median_outlier_filter(const float *src, float *dst, int w, i
             }
 
             float median = v[n / 2];
-            float diff = fabsf(center - median);
-            if (diff > THERMAL_OUTLIER_THRESH_C) {
-                float strength = clampf_local(
-                    (diff - THERMAL_OUTLIER_THRESH_C) / 1.5f,
-                    0.0f, 0.65f);
-                dst[idx] = center + strength * (median - center);
+            float second_low  = v[1];
+            float second_high = v[n - 2];
+            float struct_span = second_high - second_low;
+
+            if (struct_span < 1.50f) {
+                // 平坦背景或手心内部：使用中位数强力滤除孤立噪点
+                float diff = fabsf(center - median);
+                if (diff > THERMAL_OUTLIER_THRESH_C) {
+                    float strength = clampf_local(
+                        (diff - THERMAL_OUTLIER_THRESH_C) / 1.1f,
+                        0.15f, 0.78f);
+                    dst[idx] = center + strength * (median - center);
+                } else {
+                    dst[idx] = center;
+                }
             } else {
-                dst[idx] = center;
+                // 手指边缘、指尖或指缝区：仅当像素孤立超出次高/次低范围 [v[1], v[n-2]] 时才修正，
+                // 彻底杜绝 3x3 中位数把低温指缝拉向高温手指造成“趾蹼”！
+                if (center > second_high + 0.80f) {
+                    dst[idx] = second_high + 0.35f * (center - second_high);
+                } else if (center < second_low - 0.80f) {
+                    dst[idx] = second_low - 0.35f * (second_low - center);
+                } else {
+                    dst[idx] = center;
+                }
             }
         }
     }
@@ -248,15 +272,15 @@ static int compare_float_ascending(const void *a, const void *b)
 }
 
 /*
- * 3. 对称式 3x3 双边保边平滑滤波（消除空间颗粒感与静态奇偶场微差，不放大噪声）
- *    - 对所有像素一视同仁，消除固定图案噪声 (FPN)
- *    - 温差 < 1.8℃ 的区域（手掌内部、背景内部）强力平滑磨皮
- *    - 温差 >= 1.8℃ 的区域（手指边缘、指缝）自动截断权重，保持轮廓锐利
+ * 3. 防指缝漏热的 3x3 双边保边平滑滤波
+ *    - 平坦区消除固定图案噪声 (FPN) 与奇偶微差
+ *    - 非对称防漏热保护：当邻居比中心像素更热（例如两侧手指高于中间指缝）时，
+ *      将截断阈值收紧至 0.65℃，严防两侧高温手指向中间低温指缝扩散热量导致手指粘连
  */
 static void spatial_bilateral_denoise(const float *src, float *dst, int w, int h)
 {
-    const float edge_thresh = 1.8f;
-    const float inv_edge_thresh = 1.0f / edge_thresh;
+    const float edge_thresh_flat = 1.65f;
+    const float edge_thresh_hot_bleed = 0.65f; // 阻止高温邻居把低温指缝拉高
 
     for (int r = 0; r < h; r++) {
         int r_prev = (r > 0) ? (r - 1) : r;
@@ -284,27 +308,47 @@ static void spatial_bilateral_denoise(const float *src, float *dst, int w, int h
                 src[r_next * w + c_next]
             };
 
-            // 先对称消除中心点与正交邻域的静态奇偶微差
-            float ortho_avg = 0.25f * (ortho[0] + ortho[1] + ortho[2] + ortho[3]);
-            if (fabsf(center - ortho_avg) < 0.80f) {
-                center = 0.70f * center + 0.30f * ortho_avg;
+            // 计算正交邻域极差，判断当前是否处于平坦区
+            float o_min = ortho[0], o_max = ortho[0];
+            for (int i = 1; i < 4; i++) {
+                if (ortho[i] < o_min) o_min = ortho[i];
+                if (ortho[i] > o_max) o_max = ortho[i];
+            }
+            float ortho_span = o_max - o_min;
+
+            // 仅在非边缘/非指缝的平坦区域（ortho_span < 1.0℃）消除中心点与正交邻域的静态奇偶微差
+            if (ortho_span < 1.0f) {
+                float ortho_avg = 0.25f * (ortho[0] + ortho[1] + ortho[2] + ortho[3]);
+                if (fabsf(center - ortho_avg) < 0.80f) {
+                    center = 0.65f * center + 0.35f * ortho_avg;
+                }
             }
 
             float sum_smooth = center * 4.0f;
             float w_total = 4.0f;
 
             for (int i = 0; i < 4; i++) {
-                float d_o = fabsf(ortho[i] - center);
-                if (d_o < edge_thresh) {
-                    float t = 1.0f - d_o * inv_edge_thresh;
+                // 正交邻居：如果邻居比中心点热且处于有梯度的区域（如手指高于指缝），使用 0.65℃ 严苛阈值阻断漏热
+                float diff_o = ortho[i] - center;
+                float d_o = fabsf(diff_o);
+                float thresh_o = (diff_o > 0.0f && ortho_span >= 0.90f)
+                                 ? edge_thresh_hot_bleed
+                                 : edge_thresh_flat;
+                if (d_o < thresh_o) {
+                    float t = 1.0f - (d_o / thresh_o);
                     float w_o = 2.0f * t * t;
                     sum_smooth += ortho[i] * w_o;
                     w_total += w_o;
                 }
 
-                float d_d = fabsf(diag[i] - center);
-                if (d_d < edge_thresh) {
-                    float t = 1.0f - d_d * inv_edge_thresh;
+                // 对角邻居：同样阻止高温对角像素向低温指缝漏热
+                float diff_d = diag[i] - center;
+                float d_d = fabsf(diff_d);
+                float thresh_d = (diff_d > 0.0f && ortho_span >= 0.90f)
+                                 ? edge_thresh_hot_bleed
+                                 : edge_thresh_flat;
+                if (d_d < thresh_d) {
+                    float t = 1.0f - (d_d / thresh_d);
                     float w_d = 1.0f * t * t;
                     sum_smooth += diag[i] * w_d;
                     w_total += w_d;
@@ -574,6 +618,8 @@ void ir_camera_task_main(void *pvParameters)
 
     float smooth_min_t = THERMAL_FIXED_MIN_C;
     float smooth_max_t = THERMAL_FIXED_MAX_C;
+    float smooth_ta    = 25.0f;
+    bool ta_initialized = false;
     bool range_initialized = false;
 
     bool subpage_init[2] = {false, false};
@@ -588,11 +634,17 @@ void ir_camera_task_main(void *pvParameters)
                 continue;
             }
 
-            float ta = MLX90640_GetTa(ir_frame_data, mlx_params);
+            float raw_ta = MLX90640_GetTa(ir_frame_data, mlx_params);
+            if (!ta_initialized || !isfinite(smooth_ta)) {
+                smooth_ta = raw_ta;
+                ta_initialized = true;
+            } else if (isfinite(raw_ta)) {
+                smooth_ta += 0.12f * (raw_ta - smooth_ta);
+            }
 
             // 1. 官方原生计算：增量更新当前 subpage 的 384 个点
             MLX90640_CalculateTo(ir_frame_data, mlx_params,
-                                 emissivity, ta - TA_SHIFT, raw_temp_matrix);
+                                 emissivity, smooth_ta - TA_SHIFT, raw_temp_matrix);
 
             int mode = (ir_frame_data[832] & MLX90640_CTRL_MEAS_MODE_MASK) >> 5;
             MLX90640_BadPixelsCorrection(mlx_params->brokenPixels, raw_temp_matrix, mode, mlx_params);
@@ -608,19 +660,19 @@ void ir_camera_task_main(void *pvParameters)
                 continue;
             }
 
-            // 2. 分场时域平滑 + 运动补偿
+            // 2. 分场时域平滑 + 防趾蹼消交错
             update_temporal_and_deinterlace(raw_temp_matrix, filtered_temp,
                                             MLX_RAW_W, MLX_RAW_H, subpage);
 
-            // 3. 中值异常点抑制：去除孤立温度跳点，尽量保留边缘
+            // 3. 中值异常点抑制：平坦区滤噪，手指/指缝区保护连通特征
             spatial_median_outlier_filter(filtered_temp, median_temp,
                                           MLX_RAW_W, MLX_RAW_H);
 
-            // 4. 双边保边平滑：继续压制背景颗粒，不直接模糊强温差边缘
+            // 4. 双边保边平滑：压制背景颗粒，阻断高温手指向低温指缝漏热
             spatial_bilateral_denoise(median_temp, spatial_temp,
                                       MLX_RAW_W, MLX_RAW_H);
 
-            // 4. 统计极值
+            // 5. 统计极值
             float cur_min = 200.0f;
             float cur_max = -50.0f;
             int max_idx = 0;
@@ -678,7 +730,7 @@ void ir_camera_task_main(void *pvParameters)
             }
 #endif
 
-            // 5. 帧率统计与 HUD 字符串格式化
+            // 6. 帧率统计与 HUD 字符串格式化
             int64_t now_us = esp_timer_get_time();
             int64_t diff_us = now_us - last_time_us;
             if (diff_us >= 1000000) {
@@ -695,7 +747,7 @@ void ir_camera_task_main(void *pvParameters)
             snprintf(text_max_tag, sizeof(text_max_tag), "MAX %.1f", cur_max);
             snprintf(text_min_tag, sizeof(text_min_tag), "MIN %.1f", cur_min);
 
-            // 6. 映射并进行双线性插值送显
+            // 7. 映射并进行双线性插值送显
             if (valid_pts > 400) {
                 temperature_to_norm_u8(spatial_temp, norm_matrix, smooth_min_t, smooth_max_t);
                 uint16_t *cur_write_buf = s_display_buf[s_back_idx];
@@ -713,7 +765,7 @@ void ir_camera_task_main(void *pvParameters)
                 draw_diamond_marker(cur_write_buf, min_px_x, min_px_y, MLX_INTERP_W, MLX_INTERP_H, 5, 0x07FF);
                 draw_diamond_marker(cur_write_buf, MLX_INTERP_W / 2, MLX_INTERP_H / 2, MLX_INTERP_W, MLX_INTERP_H, 3, 0xFFFF);
 
-                // 7. 刷新到 LVGL 显存
+                // 8. 刷新到 LVGL 显存
                 if (example_lvgl_lock(100)) {
                     s_thermal_img_dsc.data = (const uint8_t *)cur_write_buf;
                     if (img_thermal) {
