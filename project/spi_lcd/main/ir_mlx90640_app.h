@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include "esp_err.h"
 #include "lvgl.h"
+#include "ir_color_modes.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -47,6 +48,8 @@ bool example_lvgl_lock(int timeout_ms);
 void example_lvgl_unlock(void);
 void ir_camera_task_main(void *pvParameters);
 void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp);
+void ir_camera_set_color_mode(ir_color_mode_t mode);
+
 
 #ifdef __cplusplus
 }

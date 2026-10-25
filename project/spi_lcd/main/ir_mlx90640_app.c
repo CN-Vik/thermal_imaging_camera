@@ -12,10 +12,21 @@
 #include "MLX90640_API.h"
 #include "ir_mlx90640_app.h"
 
+
 static const char *TAG = "mlx_app";
 
 TaskHandle_t ir_task_Handle = NULL;
 static float emissivity = 0.95f;
+
+/*
+ * 当前颜色模式：
+ * IR_COLOR_IRONBOW    铁红伪彩（默认）
+ * IR_COLOR_WHITE_HOT  白热
+ * IR_COLOR_BLACK_HOT  黑热
+ *
+ * 修改此处并重新编译、烧录即可切换模式。
+ */
+#define THERMAL_COLOR_MODE    IR_COLOR_IRONBOW
 
 /*
  * Thermal display tuning
@@ -73,8 +84,10 @@ lv_img_dsc_t s_thermal_img_dsc = {
     .data = NULL,
 };
 
-static uint16_t s_ironbow_lut[256];
 const float rate_hz_table[] = {0.5f, 1.0f, 2.0f, 4.0f, 8.0f, 16.0f, 32.0f, 64.0f};
+
+/* 当前启用的颜色查找表 */
+static uint16_t s_color_lut[256];
 
 static inline float clampf_local(float v, float lo, float hi)
 {
@@ -399,36 +412,34 @@ esp_err_t ir_camera_app_init(void)
     return ESP_OK;
 }
 
-static void init_ironbow_lut(void)
+/*
+ * 初始化热成像颜色查找表
+ *
+ * IR_COLOR_IRONBOW:
+ *     保留原有铁红伪彩效果
+ *
+ * IR_COLOR_WHITE_HOT:
+ *     低温黑色 -> 高温白色
+ *
+ * IR_COLOR_BLACK_HOT:
+ *     低温白色 -> 高温黑色
+ */
+/*
+ * 初始化热成像颜色查找表（直接复用 ir_color_modes.c 的颜色配置逻辑）
+ */
+static void init_thermal_color_lut(ir_color_mode_t mode)
 {
-    for (int i = 0; i < 256; i++) {
-        float norm = (float)i / 255.0f;
-        uint8_t r = 0, g = 0, b = 0;
+    ir_color_generate_lut(mode, s_color_lut);
+}
 
-        if (norm < 0.25f) {
-            float t = norm * 4.0f;
-            r = (uint8_t)(t * 40.0f);
-            g = 0;
-            b = (uint8_t)(t * 160.0f);
-        } else if (norm < 0.50f) {
-            float t = (norm - 0.25f) * 4.0f;
-            r = (uint8_t)(40.0f + t * 180.0f);
-            g = 0;
-            b = (uint8_t)(160.0f - t * 100.0f);
-        } else if (norm < 0.75f) {
-            float t = (norm - 0.50f) * 4.0f;
-            r = 255;
-            g = (uint8_t)(t * 180.0f);
-            b = (uint8_t)(60.0f - t * 60.0f);
-        } else {
-            float t = (norm - 0.75f) * 4.0f;
-            r = 255;
-            g = (uint8_t)(180.0f + t * 75.0f);
-            b = (uint8_t)(t * 255.0f);
-        }
-
-        s_ironbow_lut[i] = lv_color_make(r, g, b).full;
-    }
+/**
+ * @brief 配置IR颜色模式
+ * 
+ * @param mode 
+ */
+void ir_camera_set_color_mode(ir_color_mode_t mode)
+{
+    ir_color_generate_lut(mode, s_color_lut);
 }
 
 static inline void raw_rc_to_screen_xy(int raw_r, int raw_c, int *px_x, int *px_y)
@@ -573,7 +584,8 @@ void ir_camera_task_main(void *pvParameters)
     ESP_LOGI(TAG, "Thermal map: fixed range %.1fC ~ %.1fC, auto_range=%d",
              THERMAL_FIXED_MIN_C, THERMAL_FIXED_MAX_C, THERMAL_USE_AUTO_RANGE);
 
-    init_ironbow_lut();
+    // init_ironbow_lut();
+    init_thermal_color_lut(THERMAL_COLOR_MODE);
 
     MLX90640_I2CInit();
     MLX90640_SetRefreshRate(MLX90640_ADDR, RefreshRate);
@@ -753,9 +765,14 @@ void ir_camera_task_main(void *pvParameters)
                 uint16_t *cur_write_buf = s_display_buf[s_back_idx];
 
                 bilinear_scale_fullscreen_1to1(
-                    norm_matrix, MLX_RAW_W, MLX_RAW_H,
-                    cur_write_buf, MLX_INTERP_W, MLX_INTERP_H,
-                    s_ironbow_lut);
+                    norm_matrix,
+                    MLX_RAW_W, 
+                    MLX_RAW_H,
+                    cur_write_buf,
+                    MLX_INTERP_W, 
+                    MLX_INTERP_H,
+                    s_color_lut
+                );
 
                 int max_px_x, max_px_y, min_px_x, min_px_y;
                 raw_rc_to_screen_xy(max_idx / MLX_RAW_W, max_idx % MLX_RAW_W, &max_px_x, &max_px_y);
