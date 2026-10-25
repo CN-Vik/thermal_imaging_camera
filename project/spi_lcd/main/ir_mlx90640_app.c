@@ -26,7 +26,7 @@ static float emissivity = 0.95f;
  *
  * 修改此处并重新编译、烧录即可切换模式。
  */
-#define THERMAL_COLOR_MODE    IR_COLOR_RED_HOT
+#define THERMAL_COLOR_MODE    IR_COLOR_IRONBOW
 
 /*
  * Thermal display tuning

@@ -18,6 +18,7 @@
 #include "esp_log.h"
 #include "lvgl.h"
 #include "ir_mlx90640_app.h"
+#include "dev_sys.h"
 #include "esp_lcd_touch_cst816s.h"
 #include "driver/i2c_master.h"
 #include "esp_lcd_panel_st7789.h"
@@ -81,11 +82,6 @@ static SemaphoreHandle_t lvgl_mux = NULL;
 
 esp_lcd_touch_handle_t tp = NULL;
 #define TOUCH_I2C_PORT    I2C_NUM_1
-
-
-
-extern void power_on(void);
-void restart_button_event_cb(lv_event_t *e);
 
 
 

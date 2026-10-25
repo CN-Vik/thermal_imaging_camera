@@ -13,6 +13,7 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "lvgl.h"
+#include "dev_sys.h"
 
 /* 电源/按键引脚定义（与 app_main.c 保持一致）。
    这两个宏和 TAG 原本只写在 app_main.c 里，dev_sys.c 引用不到，这里补上。 */
@@ -50,6 +51,19 @@ void power_on(void)
 
     // 测试按键检测：按下按键时 IO37 会变为 0
     // 如果后续想关机，直接执行：gpio_set_level(PIN_PWR_HOLD, 0); 即可彻底断电
+}
+
+
+void power_off_event_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    gpio_set_level(PIN_PWR_HOLD, 0);  // 立即输出高电平锁定电源
+
+    ESP_LOGI(TAG, "Power_Off_via_IO36!");
+
 }
 
 

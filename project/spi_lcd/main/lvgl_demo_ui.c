@@ -2,6 +2,7 @@
 #include "lvgl.h"
 #include "ir_mlx90640_app.h"
 #include "ir_color_modes.h"
+#include "dev_sys.h"
 
 #define UI_SCREEN_W        240
 #define UI_SCREEN_H        280
@@ -26,10 +27,15 @@ lv_obj_t *tag_min = NULL;
 static lv_obj_t *touch_cursor = NULL;
 static lv_obj_t *touch_label  = NULL;
 
-/* 滑动列表菜单相关控件与状态 */
-static lv_obj_t *s_menu_backdrop = NULL;
-static lv_obj_t *s_menu_title    = NULL;
-static lv_obj_t *s_list_cont     = NULL;
+/* 二级菜单相关控件与状态：
+   一级菜单 = 模式配置（COLOR MODE / POWER OFF）
+   二级菜单 = 色彩模式调色板 */
+static lv_obj_t *s_menu_backdrop   = NULL;   // 全屏半透明遮罩（点空白处关闭）
+static lv_obj_t *s_main_menu_panel = NULL;   // 一级菜单面板：模式配置
+static lv_obj_t *s_palette_panel   = NULL;   // 二级菜单面板：色彩模式
+
+static lv_obj_t *s_menu_title = NULL;        // 二级菜单标题（SELECT: xxx）
+static lv_obj_t *s_list_cont  = NULL;        // 二级菜单调色板滑动列表容器
 static lv_obj_t *s_mode_btns[IR_COLOR_MODE_MAX] = {NULL};
 static lv_obj_t *s_mode_chks[IR_COLOR_MODE_MAX] = {NULL};
 
@@ -81,6 +87,19 @@ static void update_menu_active_style(ir_color_mode_t active_mode)
     }
 }
 
+/* 一级 / 二级菜单面板切换辅助函数 */
+static void menu_show_main(void)
+{
+    if (s_palette_panel)   lv_obj_add_flag(s_palette_panel, LV_OBJ_FLAG_HIDDEN);
+    if (s_main_menu_panel) lv_obj_clear_flag(s_main_menu_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void menu_show_palette(void)
+{
+    if (s_main_menu_panel) lv_obj_add_flag(s_main_menu_panel, LV_OBJ_FLAG_HIDDEN);
+    if (s_palette_panel)   lv_obj_clear_flag(s_palette_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
 /* 1. 在滑动列表中点击某一行：仅选中并实时预览背景颜色，不关闭弹窗 */
 static void mode_item_click_cb(lv_event_t *e)
 {
@@ -93,7 +112,7 @@ static void mode_item_click_cb(lv_event_t *e)
     ir_camera_set_color_mode(s_pending_mode);
 }
 
-/* 2. 点击底部【OK 确认】按钮：正式保存所选颜色并关闭弹窗 */
+/* 2. 点击底部【OK 确认】按钮：正式保存所选颜色并关闭整个菜单 */
 static void menu_confirm_event_cb(lv_event_t *e)
 {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
@@ -107,8 +126,21 @@ static void menu_confirm_event_cb(lv_event_t *e)
     }
 }
 
-/* 3. 点击底部【BACK 取消】或背景遮罩：恢复打开前的原颜色模式并关闭弹窗 */
-static void menu_cancel_event_cb(lv_event_t *e)
+/* 3. 点击二级菜单底部【BACK 返回】：撤销本次预览并回到一级菜单 */
+static void palette_back_event_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+
+    // 撤销预览，恢复进入菜单前的颜色模式
+    ir_camera_set_color_mode(s_backup_mode);
+    if (label_title) {
+        lv_label_set_text_fmt(label_title, "MODE: %s", ir_color_get_mode_name(s_backup_mode));
+    }
+    menu_show_main();
+}
+
+/* 4. 点击背景遮罩：无论在哪一级，都恢复原颜色模式并关闭整个菜单 */
+static void menu_backdrop_cancel_cb(lv_event_t *e)
 {
     lv_obj_t *target = lv_event_get_target(e);
     lv_obj_t *cur_target = lv_event_get_current_target(e);
@@ -124,8 +156,61 @@ static void menu_cancel_event_cb(lv_event_t *e)
     }
 }
 
-/* 创建“纵向滑动列表 + 底部取消/确认按键”弹窗 */
-static void create_color_mode_menu(lv_obj_t *parent)
+/* 5. 一级菜单点击【COLOR MODE】：进入二级调色板菜单 */
+static void main_menu_color_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+
+    s_pending_mode = s_backup_mode;
+    update_menu_active_style(s_pending_mode);
+
+    // 自动把当前选中的模式滚动到列表视野中央
+    if (s_mode_btns[s_pending_mode]) {
+        lv_obj_scroll_to_view(s_mode_btns[s_pending_mode], LV_ANIM_OFF);
+    }
+
+    menu_show_palette();
+}
+
+/* 在一级菜单面板中创建一个条目按钮（文字 + 右侧指示），返回按钮对象 */
+static lv_obj_t *create_main_menu_item(lv_obj_t *parent, const char *text,
+                                       bool danger, lv_event_cb_t cb)
+{
+    lv_obj_t *btn = lv_obj_create(parent);
+    lv_obj_remove_style_all(btn);
+    lv_obj_set_size(btn, 184, 64);
+    lv_obj_set_style_radius(btn, 12, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x22262E), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_90, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x2C3038), LV_STATE_PRESSED);
+    lv_obj_set_style_border_width(btn, 1, LV_PART_MAIN);
+    lv_obj_set_style_border_color(btn, danger ? lv_color_hex(0xFF5252) : lv_color_hex(0x00E5FF), LV_PART_MAIN);
+    lv_obj_set_style_border_opa(btn, LV_OPA_70, LV_PART_MAIN);
+    lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
+    if (cb) {
+        lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
+    }
+
+    lv_obj_t *lbl = lv_label_create(btn);
+    lv_obj_set_style_text_color(lbl, danger ? lv_color_hex(0xFF5252) : lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_label_set_text(lbl, text);
+    lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 18, 0);
+
+    // 右侧指示：进入子菜单用 ">"，关机操作用 "OFF"
+    lv_obj_t *ind = lv_label_create(btn);
+    lv_obj_set_style_text_color(ind, danger ? lv_color_hex(0xFF5252) : lv_color_hex(0x00E5FF), LV_PART_MAIN);
+    lv_obj_set_style_text_font(ind, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_label_set_text(ind, danger ? "OFF" : ">");
+    lv_obj_align(ind, LV_ALIGN_RIGHT_MID, -18, 0);
+
+    return btn;
+}
+
+/* 创建“二级菜单”：
+   一级菜单 = 模式配置（COLOR MODE / POWER OFF）
+   二级菜单 = 色彩模式调色板（9 色列表 + BACK / OK） */
+static void create_settings_menu(lv_obj_t *parent)
 {
     // 1. 全屏半透明遮罩 (点击外部自动取消)
     s_menu_backdrop = lv_obj_create(parent);
@@ -137,31 +222,61 @@ static void create_color_mode_menu(lv_obj_t *parent)
     lv_obj_set_style_bg_color(s_menu_backdrop, lv_color_black(), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(s_menu_backdrop, LV_OPA_40, LV_PART_MAIN);
     lv_obj_add_flag(s_menu_backdrop, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(s_menu_backdrop, menu_cancel_event_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(s_menu_backdrop, menu_backdrop_cancel_cb, LV_EVENT_CLICKED, NULL);
 
+    /* ================= 一级菜单：模式配置 ================= */
+    s_main_menu_panel = lv_obj_create(s_menu_backdrop);
+    lv_obj_remove_style_all(s_main_menu_panel);
+    lv_obj_set_size(s_main_menu_panel, 216, 210);
+    lv_obj_align(s_main_menu_panel, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_main_menu_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(s_main_menu_panel, lv_color_hex(0x101318), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_main_menu_panel, LV_OPA_90, LV_PART_MAIN);
+    lv_obj_set_style_border_width(s_main_menu_panel, 1, LV_PART_MAIN);
+    lv_obj_set_style_border_color(s_main_menu_panel, lv_color_hex(0x00E5FF), LV_PART_MAIN);
+    lv_obj_set_style_border_opa(s_main_menu_panel, LV_OPA_60, LV_PART_MAIN);
+    lv_obj_set_style_radius(s_main_menu_panel, 16, LV_PART_MAIN);
+    lv_obj_add_flag(s_main_menu_panel, LV_OBJ_FLAG_CLICKABLE);
+
+    // 一级菜单标题
+    lv_obj_t *main_title = lv_label_create(s_main_menu_panel);
+    lv_obj_set_style_text_color(main_title, lv_color_hex(0x00E5FF), LV_PART_MAIN);
+    lv_obj_set_style_text_font(main_title, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_label_set_text(main_title, "Dev_Setting");
+    lv_obj_align(main_title, LV_ALIGN_TOP_MID, 0, 14);
+
+    // 条目 1：色彩模式（进入二级调色板）
+    lv_obj_t *item_color = create_main_menu_item(s_main_menu_panel, "IRCOLOR MODE", false, main_menu_color_cb);
+    lv_obj_align(item_color, LV_ALIGN_TOP_MID, 0, 46);
+
+    // 条目 2：关机（直接系统重启）
+    lv_obj_t *item_power = create_main_menu_item(s_main_menu_panel, "POWER OFF", true, power_off_event_cb);
+    lv_obj_align(item_power, LV_ALIGN_TOP_MID, 0, 120);
+
+    /* ================= 二级菜单：色彩模式调色板 ================= */
     // 2. 居中主面板 (216x246)
-    lv_obj_t *panel = lv_obj_create(s_menu_backdrop);
-    lv_obj_remove_style_all(panel);
-    lv_obj_set_size(panel, 216, 246);
-    lv_obj_align(panel, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(panel, lv_color_hex(0x101318), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(panel, LV_OPA_80, LV_PART_MAIN); // 80% 透明度，方便透视预览背景热像
-    lv_obj_set_style_border_width(panel, 1, LV_PART_MAIN);
-    lv_obj_set_style_border_color(panel, lv_color_hex(0x00E5FF), LV_PART_MAIN);
-    lv_obj_set_style_border_opa(panel, LV_OPA_60, LV_PART_MAIN);
-    lv_obj_set_style_radius(panel, 16, LV_PART_MAIN);
-    lv_obj_add_flag(panel, LV_OBJ_FLAG_CLICKABLE);
+    s_palette_panel = lv_obj_create(s_menu_backdrop);
+    lv_obj_remove_style_all(s_palette_panel);
+    lv_obj_set_size(s_palette_panel, 216, 246);
+    lv_obj_align(s_palette_panel, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_palette_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(s_palette_panel, lv_color_hex(0x101318), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_palette_panel, LV_OPA_80, LV_PART_MAIN); // 80% 透明度，方便透视预览背景热像
+    lv_obj_set_style_border_width(s_palette_panel, 1, LV_PART_MAIN);
+    lv_obj_set_style_border_color(s_palette_panel, lv_color_hex(0x00E5FF), LV_PART_MAIN);
+    lv_obj_set_style_border_opa(s_palette_panel, LV_OPA_60, LV_PART_MAIN);
+    lv_obj_set_style_radius(s_palette_panel, 16, LV_PART_MAIN);
+    lv_obj_add_flag(s_palette_panel, LV_OBJ_FLAG_CLICKABLE);
 
     // 3. 顶部当前预览模式标题
-    s_menu_title = lv_label_create(panel);
+    s_menu_title = lv_label_create(s_palette_panel);
     lv_obj_set_style_text_color(s_menu_title, lv_color_hex(0x00E5FF), LV_PART_MAIN);
     lv_obj_set_style_text_font(s_menu_title, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_label_set_text(s_menu_title, "SELECT PALETTE");
+    lv_label_set_text(s_menu_title, "COLOR MODE");
     lv_obj_align(s_menu_title, LV_ALIGN_TOP_MID, 0, 10);
 
     // 4. 中间单列纵向可滑动列表容器 (宽 196px，高 152px，一次显示约 3.5 行)
-    s_list_cont = lv_obj_create(panel);
+    s_list_cont = lv_obj_create(s_palette_panel);
     lv_obj_remove_style_all(s_list_cont);
     lv_obj_set_size(s_list_cont, 196, 152);
     lv_obj_align(s_list_cont, LV_ALIGN_TOP_MID, 0, 34);
@@ -211,28 +326,28 @@ static void create_color_mode_menu(lv_obj_t *parent)
         s_mode_chks[i] = chk;
     }
 
-    // 5. 底部左侧【BACK 取消】大按钮 (92x38)
-    lv_obj_t *btn_cancel = lv_obj_create(panel);
-    lv_obj_remove_style_all(btn_cancel);
-    lv_obj_set_size(btn_cancel, 92, 38);
-    lv_obj_align(btn_cancel, LV_ALIGN_BOTTOM_LEFT, 10, -10);
-    lv_obj_set_style_bg_color(btn_cancel, lv_color_hex(0x2C3038), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(btn_cancel, LV_OPA_90, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(btn_cancel, lv_color_hex(0xFF5252), LV_STATE_PRESSED);
-    lv_obj_set_style_border_width(btn_cancel, 1, LV_PART_MAIN);
-    lv_obj_set_style_border_color(btn_cancel, lv_color_hex(0x888888), LV_PART_MAIN);
-    lv_obj_set_style_radius(btn_cancel, 10, LV_PART_MAIN);
-    lv_obj_add_flag(btn_cancel, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(btn_cancel, menu_cancel_event_cb, LV_EVENT_CLICKED, NULL);
+    // 5. 底部左侧【BACK 返回一级菜单】大按钮 (92x38)
+    lv_obj_t *btn_back = lv_obj_create(s_palette_panel);
+    lv_obj_remove_style_all(btn_back);
+    lv_obj_set_size(btn_back, 92, 38);
+    lv_obj_align(btn_back, LV_ALIGN_BOTTOM_LEFT, 10, -10);
+    lv_obj_set_style_bg_color(btn_back, lv_color_hex(0x2C3038), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(btn_back, LV_OPA_90, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(btn_back, lv_color_hex(0xFF5252), LV_STATE_PRESSED);
+    lv_obj_set_style_border_width(btn_back, 1, LV_PART_MAIN);
+    lv_obj_set_style_border_color(btn_back, lv_color_hex(0x888888), LV_PART_MAIN);
+    lv_obj_set_style_radius(btn_back, 10, LV_PART_MAIN);
+    lv_obj_add_flag(btn_back, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(btn_back, palette_back_event_cb, LV_EVENT_CLICKED, NULL);
 
-    lv_obj_t *lbl_cancel = lv_label_create(btn_cancel);
-    lv_obj_set_style_text_color(lbl_cancel, lv_color_white(), LV_PART_MAIN);
-    lv_obj_set_style_text_font(lbl_cancel, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_label_set_text(lbl_cancel, "BACK");
-    lv_obj_center(lbl_cancel);
+    lv_obj_t *lbl_back = lv_label_create(btn_back);
+    lv_obj_set_style_text_color(lbl_back, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_text_font(lbl_back, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_label_set_text(lbl_back, "BACK");
+    lv_obj_center(lbl_back);
 
     // 6. 底部右侧【OK 确认】大按钮 (92x38)
-    lv_obj_t *btn_ok = lv_obj_create(panel);
+    lv_obj_t *btn_ok = lv_obj_create(s_palette_panel);
     lv_obj_remove_style_all(btn_ok);
     lv_obj_set_size(btn_ok, 92, 38);
     lv_obj_align(btn_ok, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
@@ -252,6 +367,7 @@ static void create_color_mode_menu(lv_obj_t *parent)
     lv_obj_center(lbl_ok);
 
     update_menu_active_style(ir_camera_get_color_mode());
+    menu_show_main();
     lv_obj_add_flag(s_menu_backdrop, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -293,7 +409,7 @@ static void screen_touch_event_cb(lv_event_t *e)
         s_swipe_moved = false;
     }
 
-    // 长按屏幕：弹出调色板（如果手指已经移动过，说明是在滑动，不弹菜单）
+    // 长按屏幕：弹出“模式配置”一级菜单（如果手指已经移动过，说明是在滑动，不弹菜单）
     if (code == LV_EVENT_LONG_PRESSED) {
         if (s_swipe_moved) return;
 
@@ -305,12 +421,8 @@ static void screen_touch_event_cb(lv_event_t *e)
             s_backup_mode  = ir_camera_get_color_mode();
             s_pending_mode = s_backup_mode;
             update_menu_active_style(s_pending_mode);
+            menu_show_main();                      // 长按先打开一级“模式配置”菜单
             lv_obj_clear_flag(s_menu_backdrop, LV_OBJ_FLAG_HIDDEN);
-
-            // 自动把当前选中的模式滚动到列表视野中央
-            if (s_mode_btns[s_pending_mode]) {
-                lv_obj_scroll_to_view(s_mode_btns[s_pending_mode], LV_ANIM_OFF);
-            }
         }
         return;
     }
@@ -508,7 +620,7 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
     lv_obj_clear_flag(touch_label, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(touch_label, LV_OBJ_FLAG_HIDDEN);
 
-    create_color_mode_menu(ui_root);
+    create_settings_menu(ui_root);
 
     lv_obj_add_flag(scr, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(scr, screen_touch_event_cb, LV_EVENT_ALL, NULL);
