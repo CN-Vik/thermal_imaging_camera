@@ -88,6 +88,7 @@ const float rate_hz_table[] = {0.5f, 1.0f, 2.0f, 4.0f, 8.0f, 16.0f, 32.0f, 64.0f
 
 /* 当前启用的颜色查找表 */
 static uint16_t s_color_lut[256];
+static ir_color_mode_t s_cur_color_mode = THERMAL_COLOR_MODE;
 
 static inline float clampf_local(float v, float lo, float hi)
 {
@@ -429,6 +430,7 @@ esp_err_t ir_camera_app_init(void)
  */
 static void init_thermal_color_lut(ir_color_mode_t mode)
 {
+    s_cur_color_mode = mode;
     ir_color_generate_lut(mode, s_color_lut);
 }
 
@@ -439,7 +441,14 @@ static void init_thermal_color_lut(ir_color_mode_t mode)
  */
 void ir_camera_set_color_mode(ir_color_mode_t mode)
 {
+    if (mode >= IR_COLOR_MODE_MAX) return;
+    s_cur_color_mode = mode;
     ir_color_generate_lut(mode, s_color_lut);
+}
+
+ir_color_mode_t ir_camera_get_color_mode(void)
+{
+    return s_cur_color_mode;
 }
 
 static inline void raw_rc_to_screen_xy(int raw_r, int raw_c, int *px_x, int *px_y)

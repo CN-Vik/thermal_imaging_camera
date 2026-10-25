@@ -450,6 +450,7 @@ void app_main(void)
     indev_drv.type = LV_INDEV_TYPE_POINTER;
     indev_drv.disp = disp;
     indev_drv.read_cb = example_lvgl_touch_cb;
+    indev_drv.long_press_time = 500;// 长按 500ms 触发菜单（默认 400ms）
     indev_drv.user_data = tp;
     lv_indev_drv_register(&indev_drv);
     // ----------------------------

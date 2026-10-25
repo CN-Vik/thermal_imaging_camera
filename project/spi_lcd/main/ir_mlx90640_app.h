@@ -49,7 +49,7 @@ void example_lvgl_unlock(void);
 void ir_camera_task_main(void *pvParameters);
 void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp);
 void ir_camera_set_color_mode(ir_color_mode_t mode);
-
+ir_color_mode_t ir_camera_get_color_mode(void);
 
 #ifdef __cplusplus
 }
