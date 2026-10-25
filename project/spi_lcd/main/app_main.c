@@ -82,6 +82,13 @@ static SemaphoreHandle_t lvgl_mux = NULL;
 esp_lcd_touch_handle_t tp = NULL;
 #define TOUCH_I2C_PORT    I2C_NUM_1
 
+
+
+extern void power_on(void);
+void restart_button_event_cb(lv_event_t *e);
+
+
+
 static esp_err_t app_touch_init(void)
 {
     // 1. 初始化独立的 I2C_NUM_1 总线 (用于触摸 CST816)
@@ -288,36 +295,6 @@ static void example_lvgl_port_task(void *arg)
 }
 
 
-void power_on(void)
-{
-    // 1. 最优先任务：拉高 IO36，锁定电源！松手不掉电！
-    gpio_config_t hold_cfg = {
-        .pin_bit_mask = (1ULL << PIN_PWR_HOLD),
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    gpio_config(&hold_cfg);
-    gpio_set_level(PIN_PWR_HOLD, 1);  // 立即输出高电平锁定电源
-
-    // 2. 配置 IO37 为带上拉的输入，用于开机后检测按键
-    gpio_config_t key_cfg = {
-        .pin_bit_mask = (1ULL << PIN_KEY_DET),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    gpio_config(&key_cfg);
-
-    // 3. 正常打印 LOG
-    ESP_LOGI(TAG,"HELLO_ESP32-S3\r\n");
-    ESP_LOGI(TAG, "Power_successfully_latched_via_IO36!");
-
-    // 测试按键检测：按下按键时 IO37 会变为 0
-    // 如果后续想关机，直接执行：gpio_set_level(PIN_PWR_HOLD, 0); 即可彻底断电
-}
 
 void app_main(void)
 {

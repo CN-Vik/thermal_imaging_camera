@@ -68,6 +68,34 @@ static float emissivity = 0.95f;
 #define IR_MIRROR_X                     0
 #define IR_MIRROR_Y                     1
 
+#define IR_SCREEN_W     240
+#define IR_SCREEN_H     280
+#define IR_TAG_GUESS_W  88
+#define IR_TAG_GUESS_H  22
+
+
+static void place_temp_tag(lv_obj_t *tag, int px, int py, const char *text)
+{
+    if (tag == NULL) return;
+
+    lv_label_set_text(tag, text);
+
+    int x = px + 8;
+    int y = py + 8;
+
+    /* 右边放不下就放左边，下边放不下就放上边 */
+    if (x + IR_TAG_GUESS_W > IR_SCREEN_W) x = px - IR_TAG_GUESS_W - 8;
+    if (y + IR_TAG_GUESS_H > IR_SCREEN_H) y = py - IR_TAG_GUESS_H - 8;
+
+    /* 最后再夹一次，保证不出屏 */
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x > IR_SCREEN_W - IR_TAG_GUESS_W) x = IR_SCREEN_W - IR_TAG_GUESS_W;
+    if (y > IR_SCREEN_H - IR_TAG_GUESS_H) y = IR_SCREEN_H - IR_TAG_GUESS_H;
+
+    lv_obj_set_pos(tag, x, y);
+}
+
 /* X/Y 独立全视野定点数缩放步进 */
 static uint32_t s_scale_x_fp = 0;
 static uint32_t s_scale_y_fp = 0;
@@ -801,18 +829,9 @@ void ir_camera_task_main(void *pvParameters)
                     if (label_fps_float) lv_label_set_text(label_fps_float, text_fps);
                     if (label_info) lv_label_set_text(label_info, text_info);
 
-                    if (tag_max) {
-                        int pos_x = (max_px_x > 175) ? (max_px_x - 58) : (max_px_x + 8);
-                        int pos_y = (max_px_y < 45) ? (max_px_y + 10) : ((max_px_y > 215) ? (max_px_y - 18) : (max_px_y - 8));
-                        lv_label_set_text(tag_max, text_max_tag);
-                        lv_obj_set_pos(tag_max, pos_x, pos_y);
-                    }
-                    if (tag_min) {
-                        int pos_x = (min_px_x > 175) ? (min_px_x - 58) : (min_px_x + 8);
-                        int pos_y = (min_px_y < 45) ? (min_px_y + 10) : ((min_px_y > 215) ? (min_px_y - 18) : (min_px_y - 8));
-                        lv_label_set_text(tag_min, text_min_tag);
-                        lv_obj_set_pos(tag_min, pos_x, pos_y);
-                    }
+                    /* 温度气泡夹在屏幕内，防止超出 240x280 */
+                    place_temp_tag(tag_max, max_px_x, max_px_y, text_max_tag);
+                    place_temp_tag(tag_min, min_px_x, min_px_y, text_min_tag);
 
                     if (s_display_buf[0] != s_display_buf[1]) {
                         s_back_idx = 1U - s_back_idx;

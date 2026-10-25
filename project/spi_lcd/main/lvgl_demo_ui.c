@@ -1,6 +1,20 @@
+#include <stdlib.h>
 #include "lvgl.h"
 #include "ir_mlx90640_app.h"
 #include "ir_color_modes.h"
+
+#define UI_SCREEN_W        240
+#define UI_SCREEN_H        280
+#define TOUCH_CURSOR_SIZE  30
+#define TOUCH_LABEL_W      96
+#define TOUCH_LABEL_H      16
+
+static inline lv_coord_t ui_clamp(lv_coord_t v, lv_coord_t lo, lv_coord_t hi)
+{
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
 
 lv_obj_t *img_thermal = NULL;
 lv_obj_t *label_title = NULL;
@@ -22,6 +36,15 @@ static lv_obj_t *s_mode_chks[IR_COLOR_MODE_MAX] = {NULL};
 static ir_color_mode_t s_backup_mode  = IR_COLOR_RED_HOT; // 打开菜单前的模式（供取消恢复）
 static ir_color_mode_t s_pending_mode = IR_COLOR_RED_HOT; // 列表中当前点选预览的模式
 
+/* 左右滑动状态：按下记录起点，移动过程中达到阈值立即切换（不依赖松手事件） */
+static lv_point_t s_swipe_start = {0, 0};
+static bool s_swipe_tracking = false;
+static bool s_swipe_fired    = false;
+static bool s_swipe_moved    = false;
+
+#define COLOR_SWIPE_MIN_DX       40   // 水平移动超过 40px 切换模式
+#define COLOR_SWIPE_MOVE_PX      12   // 超过 12px 视为“在滑动”，不再触发长按菜单
+
 static const uint32_t s_mode_dot_hex[IR_COLOR_MODE_MAX] = {
     0xFFFFFF, // White Hot
     0x707070, // Black Hot
@@ -33,27 +56,6 @@ static const uint32_t s_mode_dot_hex[IR_COLOR_MODE_MAX] = {
     0x76FF03, // Green Hot
     0x2979FF, // Cold-Hot
 };
-
-/* 切换 UI 控件在【实时模式】与【相册模式】下的显隐状态 */
-
-
-/* 拍照按钮回调 */
-
-
-/* 进入相册按钮回调 */
-
-
-/* 返回实时模式按钮回调 */
-
-
-/* 相册上一张/下一张翻页回调 */
-
-
-/* 相册删除当前照片回调 */
-
-
-/* 快速创建半透明胶囊按钮的辅助函数 */
-
 
 /* 刷新滑动列表中选中项的高亮样式与右侧勾选标记 */
 static void update_menu_active_style(ir_color_mode_t active_mode)
@@ -128,8 +130,10 @@ static void create_color_mode_menu(lv_obj_t *parent)
     // 1. 全屏半透明遮罩 (点击外部自动取消)
     s_menu_backdrop = lv_obj_create(parent);
     lv_obj_remove_style_all(s_menu_backdrop);
-    lv_obj_set_size(s_menu_backdrop, 240, 280);
+    lv_obj_set_size(s_menu_backdrop, UI_SCREEN_W, UI_SCREEN_H);
     lv_obj_set_pos(s_menu_backdrop, 0, 0);
+    lv_obj_clear_flag(s_menu_backdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(s_menu_backdrop, LV_SCROLLBAR_MODE_OFF);
     lv_obj_set_style_bg_color(s_menu_backdrop, lv_color_black(), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(s_menu_backdrop, LV_OPA_40, LV_PART_MAIN);
     lv_obj_add_flag(s_menu_backdrop, LV_OBJ_FLAG_CLICKABLE);
@@ -140,6 +144,7 @@ static void create_color_mode_menu(lv_obj_t *parent)
     lv_obj_remove_style_all(panel);
     lv_obj_set_size(panel, 216, 246);
     lv_obj_align(panel, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(panel, lv_color_hex(0x101318), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(panel, LV_OPA_80, LV_PART_MAIN); // 80% 透明度，方便透视预览背景热像
     lv_obj_set_style_border_width(panel, 1, LV_PART_MAIN);
@@ -250,6 +255,21 @@ static void create_color_mode_menu(lv_obj_t *parent)
     lv_obj_add_flag(s_menu_backdrop, LV_OBJ_FLAG_HIDDEN);
 }
 
+/* 切换到下一个/上一个颜色模式，并同步更新顶部标题 */
+static void cycle_color_mode(int direction)
+{
+    int mode = (int)ir_camera_get_color_mode();
+    mode = (mode + direction + IR_COLOR_MODE_MAX) % IR_COLOR_MODE_MAX;
+
+    ir_color_mode_t next_mode = (ir_color_mode_t)mode;
+    ir_camera_set_color_mode(next_mode);
+
+    if (label_title) {
+        lv_label_set_text_fmt(label_title, "MODE: %s",
+                              ir_color_get_mode_name(next_mode));
+    }
+}
+
 static void screen_touch_event_cb(lv_event_t *e)
 {
     lv_event_code_t code = lv_event_get_code(e);
@@ -257,13 +277,27 @@ static void screen_touch_event_cb(lv_event_t *e)
     if (!indev) return;
 
     if (s_menu_backdrop && !lv_obj_has_flag(s_menu_backdrop, LV_OBJ_FLAG_HIDDEN)) {
+        s_swipe_tracking = false;
+        s_swipe_moved = false;
+        s_swipe_fired = false;
         lv_obj_add_flag(touch_cursor, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(touch_label, LV_OBJ_FLAG_HIDDEN);
         return;
     }
 
-    // 长按屏幕：记录当前模式，弹出滑动列表并自动滚动到当前选中项
+    /* 记录手指按下位置 */
+    if (code == LV_EVENT_PRESSED) {
+        lv_indev_get_point(indev, &s_swipe_start);
+        s_swipe_tracking = true;
+        s_swipe_fired = false;
+        s_swipe_moved = false;
+    }
+
+    // 长按屏幕：弹出调色板（如果手指已经移动过，说明是在滑动，不弹菜单）
     if (code == LV_EVENT_LONG_PRESSED) {
+        if (s_swipe_moved) return;
+
+        s_swipe_tracking = false;
         lv_obj_add_flag(touch_cursor, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(touch_label, LV_OBJ_FLAG_HIDDEN);
 
@@ -284,13 +318,36 @@ static void screen_touch_event_cb(lv_event_t *e)
     if (code == LV_EVENT_PRESSED || code == LV_EVENT_PRESSING) {
         lv_point_t p;
         lv_indev_get_point(indev, &p);
-        lv_obj_set_pos(touch_cursor, p.x - 15, p.y - 15);
+
+        int dx = p.x - s_swipe_start.x;
+        int dy = p.y - s_swipe_start.y;
+
+        if (abs(dx) > COLOR_SWIPE_MOVE_PX || abs(dy) > COLOR_SWIPE_MOVE_PX) {
+            s_swipe_moved = true;
+        }
+
+        /* 达到阈值立即切换：不依赖松手坐标，快速/斜向滑动也能生效 */
+        if (s_swipe_tracking && !s_swipe_fired &&
+            abs(dx) >= COLOR_SWIPE_MIN_DX && abs(dx) > abs(dy)) {
+            cycle_color_mode(dx < 0 ? +1 : -1);
+            s_swipe_fired = true;
+        }
+
+        lv_obj_set_pos(touch_cursor,
+                       ui_clamp(p.x - TOUCH_CURSOR_SIZE / 2, 0, UI_SCREEN_W - TOUCH_CURSOR_SIZE),
+                       ui_clamp(p.y - TOUCH_CURSOR_SIZE / 2, 0, UI_SCREEN_H - TOUCH_CURSOR_SIZE));
         lv_obj_clear_flag(touch_cursor, LV_OBJ_FLAG_HIDDEN);
+
         lv_label_set_text_fmt(touch_label, "X:%d Y:%d", p.x, p.y);
-        lv_obj_set_pos(touch_label, (p.x > 50) ? (p.x - 30) : 5, (p.y > 30) ? (p.y - 25) : 5);
+        lv_obj_set_pos(touch_label,
+                       ui_clamp(p.x + 10, 0, UI_SCREEN_W - TOUCH_LABEL_W),
+                       ui_clamp(p.y + 10, 0, UI_SCREEN_H - TOUCH_LABEL_H));
         lv_obj_clear_flag(touch_label, LV_OBJ_FLAG_HIDDEN);
-    } 
+    }
     else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+        s_swipe_tracking = false;
+        s_swipe_fired = false;
+        s_swipe_moved = false;
         lv_obj_add_flag(touch_cursor, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(touch_label, LV_OBJ_FLAG_HIDDEN);
     }
@@ -300,17 +357,43 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
 {
     lv_obj_t *scr = lv_disp_get_scr_act(disp);
 
+    /* ================= 关键修复 1：屏幕本身禁止滚动 ================= */
+    /* LVGL v8 的 screen 默认带 SCROLLABLE/ELASTIC/MOMENTUM，
+       并且 scroll_dir=LV_DIR_ALL、滚动条=AUTO。
+       关掉以后，拖动永远不会变成“滚屏”。 */
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLL_ELASTIC);
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLL_MOMENTUM);
+    lv_obj_set_scroll_dir(scr, LV_DIR_NONE);
+    lv_obj_set_scrollbar_mode(scr, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_scroll_to(scr, 0, 0, LV_ANIM_OFF);
+
+    /* 兜底：万一还有哪里露出来，露的是黑底而不是白屏 */
+    lv_obj_set_style_bg_color(scr, lv_color_black(), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, LV_PART_MAIN);
+
+    /* ================= 关键修复 2：所有 UI 放进等大的根容器 ================= */
+    /* 屏幕的直接子对象只有 ui_root（正好 240x280），因此 screen 的滚动范围
+       永远是 0；就算内部的气泡/准星超出屏幕，也只影响 ui_root，不影响 scr。 */
+    lv_obj_t *ui_root = lv_obj_create(scr);
+    lv_obj_remove_style_all(ui_root);
+    lv_obj_set_pos(ui_root, 0, 0);
+    lv_obj_set_size(ui_root, UI_SCREEN_W, UI_SCREEN_H);
+    lv_obj_clear_flag(ui_root, LV_OBJ_FLAG_CLICKABLE);      /* 点击穿透到 scr，滑动事件仍在 scr 上处理 */
+    lv_obj_clear_flag(ui_root, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(ui_root, LV_SCROLLBAR_MODE_OFF);
+
     // 1. 全屏热成像底图
-    img_thermal = lv_img_create(scr);
+    img_thermal = lv_img_create(ui_root);
     lv_img_set_src(img_thermal, &s_thermal_img_dsc);
     lv_img_set_zoom(img_thermal, 256);
     lv_img_set_antialias(img_thermal, false);
     lv_obj_set_pos(img_thermal, 0, 0);
-    lv_obj_set_size(img_thermal, 240, 280);
+    lv_obj_set_size(img_thermal, UI_SCREEN_W, UI_SCREEN_H);
     lv_obj_clear_flag(img_thermal, LV_OBJ_FLAG_CLICKABLE);
 
     // 2. 顶部标题胶囊
-    lv_obj_t *top_capsule = lv_obj_create(scr);
+    lv_obj_t *top_capsule = lv_obj_create(ui_root);
     lv_obj_remove_style_all(top_capsule);
     lv_obj_set_size(top_capsule, 180, 24);
     lv_obj_align(top_capsule, LV_ALIGN_TOP_MID, 0, 6);
@@ -329,7 +412,7 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
     lv_obj_align(label_title, LV_ALIGN_CENTER, 0, 0);
 
     // 3. 左上角帧率小药丸
-    label_fps_float = lv_label_create(scr);
+    label_fps_float = lv_label_create(ui_root);
     lv_obj_set_style_bg_color(label_fps_float, lv_color_black(), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(label_fps_float, LV_OPA_50, LV_PART_MAIN);
     lv_obj_set_style_border_width(label_fps_float, 1, LV_PART_MAIN);
@@ -344,7 +427,7 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
     lv_label_set_text(label_fps_float, "-- FPS");
 
     // 4. 右上角发射率小药丸
-    lv_obj_t *tag_emissivity = lv_label_create(scr);
+    lv_obj_t *tag_emissivity = lv_label_create(ui_root);
     lv_obj_set_style_bg_color(tag_emissivity, lv_color_black(), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(tag_emissivity, LV_OPA_50, LV_PART_MAIN);
     lv_obj_set_style_border_width(tag_emissivity, 1, LV_PART_MAIN);
@@ -359,7 +442,7 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
     lv_label_set_text(tag_emissivity, "e:0.95");
 
     // 5. 动态最高温与最低温指示气泡
-    tag_max = lv_label_create(scr);
+    tag_max = lv_label_create(ui_root);
     lv_obj_set_style_bg_color(tag_max, lv_color_black(), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(tag_max, LV_OPA_60, LV_PART_MAIN);
     lv_obj_set_style_border_width(tag_max, 1, LV_PART_MAIN);
@@ -372,7 +455,7 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
     lv_obj_set_style_radius(tag_max, LV_RADIUS_CIRCLE, LV_PART_MAIN);
     lv_label_set_text(tag_max, "");
 
-    tag_min = lv_label_create(scr);
+    tag_min = lv_label_create(ui_root);
     lv_obj_set_style_bg_color(tag_min, lv_color_black(), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(tag_min, LV_OPA_60, LV_PART_MAIN);
     lv_obj_set_style_border_width(tag_min, 1, LV_PART_MAIN);
@@ -386,7 +469,7 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
     lv_label_set_text(tag_min, "");
 
     // 6. 底部仪表盘卡片
-    lv_obj_t *bottom_capsule = lv_obj_create(scr);
+    lv_obj_t *bottom_capsule = lv_obj_create(ui_root);
     lv_obj_remove_style_all(bottom_capsule);
     lv_obj_set_size(bottom_capsule, 226, 56);
     lv_obj_align(bottom_capsule, LV_ALIGN_BOTTOM_MID, 0, -8);
@@ -406,9 +489,9 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
     lv_label_set_text(label_info, "Calibrating Sensor...");
 
     // 7. 触摸准星与长按滑动列表菜单
-    touch_cursor = lv_obj_create(scr);
+    touch_cursor = lv_obj_create(ui_root);
     lv_obj_remove_style_all(touch_cursor);
-    lv_obj_set_size(touch_cursor, 30, 30);
+    lv_obj_set_size(touch_cursor, TOUCH_CURSOR_SIZE, TOUCH_CURSOR_SIZE);
     lv_obj_set_style_radius(touch_cursor, LV_RADIUS_CIRCLE, LV_PART_MAIN);
     lv_obj_set_style_border_width(touch_cursor, 2, LV_PART_MAIN);
     lv_obj_set_style_border_color(touch_cursor, lv_color_hex(0x00E5FF), LV_PART_MAIN);
@@ -417,15 +500,16 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
     lv_obj_clear_flag(touch_cursor, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(touch_cursor, LV_OBJ_FLAG_HIDDEN);
 
-    touch_label = lv_label_create(scr);
+    touch_label = lv_label_create(ui_root);
+    lv_obj_set_size(touch_label, TOUCH_LABEL_W, TOUCH_LABEL_H);
+    lv_label_set_long_mode(touch_label, LV_LABEL_LONG_CLIP);
     lv_obj_set_style_text_color(touch_label, lv_color_hex(0x00E5FF), LV_PART_MAIN);
     lv_obj_set_style_text_font(touch_label, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_clear_flag(touch_label, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(touch_label, LV_OBJ_FLAG_HIDDEN);
 
-    create_color_mode_menu(scr);
+    create_color_mode_menu(ui_root);
 
     lv_obj_add_flag(scr, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(scr, screen_touch_event_cb, LV_EVENT_ALL, NULL);
 }
-
