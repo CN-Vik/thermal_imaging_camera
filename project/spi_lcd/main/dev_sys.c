@@ -60,10 +60,14 @@ void power_off_event_cb(lv_event_t *e)
         return;
     }
 
-    gpio_set_level(PIN_PWR_HOLD, 0);  // 立即输出高电平锁定电源
+    sys_power_off();
+}
 
+/* 彻底断电：拉低 IO36，松手即断电 */
+void sys_power_off(void)
+{
+    gpio_set_level(PIN_PWR_HOLD, 0);
     ESP_LOGI(TAG, "Power_Off_via_IO36!");
-
 }
 
 

@@ -23,6 +23,9 @@ void power_on(void);
 void restart_button_event_cb(lv_event_t *e);
 void power_off_event_cb(lv_event_t *e);
 
+/* 彻底断电：拉低 IO36（可被 LVGL 开关等非 CLICKED 事件直接调用） */
+void sys_power_off(void);
+
 
 #ifdef __cplusplus
 }

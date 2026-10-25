@@ -15,4 +15,5 @@ idf_component_register(
         lvgl
         esp_lcd_touch
         esp_lcd_touch_cst816s
+        nvs_flash
 )

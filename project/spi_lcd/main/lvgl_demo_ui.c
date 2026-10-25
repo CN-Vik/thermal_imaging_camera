@@ -3,6 +3,7 @@
 #include "ir_mlx90640_app.h"
 #include "ir_color_modes.h"
 #include "dev_sys.h"
+#include "lang.h"
 
 #define UI_SCREEN_W        240
 #define UI_SCREEN_H        280
@@ -83,7 +84,7 @@ static void update_menu_active_style(ir_color_mode_t active_mode)
         }
     }
     if (s_menu_title) {
-        lv_label_set_text_fmt(s_menu_title, "SELECT: %s", ir_color_get_mode_name(active_mode));
+        lv_label_set_text_fmt(s_menu_title, lang_str(STR_SELECT_FMT), ir_color_get_mode_name(active_mode));
     }
 }
 
@@ -193,7 +194,7 @@ static lv_obj_t *create_main_menu_item(lv_obj_t *parent, const char *text,
 
     lv_obj_t *lbl = lv_label_create(btn);
     lv_obj_set_style_text_color(lbl, danger ? lv_color_hex(0xFF5252) : lv_color_white(), LV_PART_MAIN);
-    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(lbl, lang_font(), LV_PART_MAIN);
     lv_label_set_text(lbl, text);
     lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 18, 0);
 
@@ -203,6 +204,31 @@ static lv_obj_t *create_main_menu_item(lv_obj_t *parent, const char *text,
     lv_obj_set_style_text_font(ind, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_label_set_text(ind, danger ? "OFF" : ">");
     lv_obj_align(ind, LV_ALIGN_RIGHT_MID, -18, 0);
+
+    return btn;
+}
+
+/* 关机按钮：纯红底 + 白色加粗文字，按下抬起（CLICKED）后彻底断电 */
+static lv_obj_t *create_power_button(lv_obj_t *parent)
+{
+    lv_obj_t *btn = lv_obj_create(parent);
+    lv_obj_remove_style_all(btn);
+    lv_obj_set_size(btn, 184, 64);
+    lv_obj_set_style_radius(btn, 12, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0xD50000), LV_PART_MAIN);   /* 纯红 */
+    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0xFF1744), LV_STATE_PRESSED);
+    lv_obj_set_style_border_width(btn, 2, LV_PART_MAIN);
+    lv_obj_set_style_border_color(btn, lv_color_hex(0xFF5252), LV_PART_MAIN);
+    lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(btn, power_off_event_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *lbl = lv_label_create(btn);
+    lv_obj_set_style_text_color(lbl, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_text_font(lbl, lang_font(), LV_PART_MAIN);
+    lv_label_set_text(lbl, lang_str(STR_POWER_OFF));
+    lv_obj_center(lbl);
 
     return btn;
 }
@@ -241,16 +267,16 @@ static void create_settings_menu(lv_obj_t *parent)
     // 一级菜单标题
     lv_obj_t *main_title = lv_label_create(s_main_menu_panel);
     lv_obj_set_style_text_color(main_title, lv_color_hex(0x00E5FF), LV_PART_MAIN);
-    lv_obj_set_style_text_font(main_title, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_label_set_text(main_title, "Dev_Setting");
+    lv_obj_set_style_text_font(main_title, lang_font(), LV_PART_MAIN);
+    lv_label_set_text(main_title, lang_str(STR_MODE_CONFIG));
     lv_obj_align(main_title, LV_ALIGN_TOP_MID, 0, 14);
 
     // 条目 1：色彩模式（进入二级调色板）
-    lv_obj_t *item_color = create_main_menu_item(s_main_menu_panel, "IRCOLOR MODE", false, main_menu_color_cb);
+    lv_obj_t *item_color = create_main_menu_item(s_main_menu_panel, lang_str(STR_COLOR_MODE), false, main_menu_color_cb);
     lv_obj_align(item_color, LV_ALIGN_TOP_MID, 0, 46);
 
-    // 条目 2：关机（直接系统重启）
-    lv_obj_t *item_power = create_main_menu_item(s_main_menu_panel, "POWER OFF", true, power_off_event_cb);
+    // 条目 2：关机（纯红底 + 白色加粗文字，点击后断电）
+    lv_obj_t *item_power = create_power_button(s_main_menu_panel);
     lv_obj_align(item_power, LV_ALIGN_TOP_MID, 0, 120);
 
     /* ================= 二级菜单：色彩模式调色板 ================= */
@@ -271,8 +297,8 @@ static void create_settings_menu(lv_obj_t *parent)
     // 3. 顶部当前预览模式标题
     s_menu_title = lv_label_create(s_palette_panel);
     lv_obj_set_style_text_color(s_menu_title, lv_color_hex(0x00E5FF), LV_PART_MAIN);
-    lv_obj_set_style_text_font(s_menu_title, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_label_set_text(s_menu_title, "COLOR MODE");
+    lv_obj_set_style_text_font(s_menu_title, lang_font(), LV_PART_MAIN);
+    lv_label_set_text(s_menu_title, lang_str(STR_COLOR_MODE));
     lv_obj_align(s_menu_title, LV_ALIGN_TOP_MID, 0, 10);
 
     // 4. 中间单列纵向可滑动列表容器 (宽 196px，高 152px，一次显示约 3.5 行)
@@ -342,8 +368,8 @@ static void create_settings_menu(lv_obj_t *parent)
 
     lv_obj_t *lbl_back = lv_label_create(btn_back);
     lv_obj_set_style_text_color(lbl_back, lv_color_white(), LV_PART_MAIN);
-    lv_obj_set_style_text_font(lbl_back, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_label_set_text(lbl_back, "BACK");
+    lv_obj_set_style_text_font(lbl_back, lang_font(), LV_PART_MAIN);
+    lv_label_set_text(lbl_back, lang_str(STR_BACK));
     lv_obj_center(lbl_back);
 
     // 6. 底部右侧【OK 确认】大按钮 (92x38)
@@ -362,8 +388,8 @@ static void create_settings_menu(lv_obj_t *parent)
 
     lv_obj_t *lbl_ok = lv_label_create(btn_ok);
     lv_obj_set_style_text_color(lbl_ok, lv_color_white(), LV_PART_MAIN);
-    lv_obj_set_style_text_font(lbl_ok, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_label_set_text(lbl_ok, "OK");
+    lv_obj_set_style_text_font(lbl_ok, lang_font(), LV_PART_MAIN);
+    lv_label_set_text(lbl_ok, lang_str(STR_OK));
     lv_obj_center(lbl_ok);
 
     update_menu_active_style(ir_camera_get_color_mode());
@@ -595,10 +621,10 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
 
     label_info = lv_label_create(bottom_capsule);
     lv_obj_set_style_text_color(label_info, lv_color_white(), LV_PART_MAIN);
-    lv_obj_set_style_text_font(label_info, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(label_info, lang_font(), LV_PART_MAIN);
     lv_obj_set_style_text_align(label_info, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(label_info, LV_ALIGN_CENTER, 0, 0);
-    lv_label_set_text(label_info, "Calibrating Sensor...");
+    lv_label_set_text(label_info, lang_str(STR_CALIBRATING));
 
     // 7. 触摸准星与长按滑动列表菜单
     touch_cursor = lv_obj_create(ui_root);

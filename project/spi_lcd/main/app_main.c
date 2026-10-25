@@ -19,6 +19,8 @@
 #include "lvgl.h"
 #include "ir_mlx90640_app.h"
 #include "dev_sys.h"
+#include "lang.h"
+#include "boot_ui.h"
 #include "esp_lcd_touch_cst816s.h"
 #include "driver/i2c_master.h"
 #include "esp_lcd_panel_st7789.h"
@@ -461,6 +463,13 @@ void app_main(void)
         NULL,
         0
     );
+
+    /* ============ 开机 Logo + 首次开机语言选择 ============ */
+    lang_init();
+    boot_show_splash(disp);
+    if (!lang_configured()) {
+        boot_show_language_select(disp);
+    }
 
     ESP_LOGI(TAG, "Init thermal buffer");
     ESP_ERROR_CHECK(ir_camera_app_init()); // 务必在创建 UI 前分配显存！
