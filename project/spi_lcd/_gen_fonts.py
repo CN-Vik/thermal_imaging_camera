@@ -5,24 +5,37 @@ MAIN = r"C:\Users\ufo28\Desktop\vik_project\thermal_imaging_camera\project\spi_l
 FONTS = r"C:\Windows\Fonts"
 
 # ---- language / strings (single source of truth) ----
-LANG_ORDER = ["ZH", "EN", "JA", "KO", "RU"]
+# 顺序：中英俄日韩
+LANG_ORDER = ["ZH", "EN", "RU", "JA", "KO"]
 
 STR_KEYS = [
     "LANG_TITLE", "MODE_CONFIG", "COLOR_MODE", "POWER_OFF",
     "BACK", "OK", "POWER", "SELECT_FMT", "CALIBRATING",
+    "LANGUAGE", "CAPTURE", "GALLERY", "DELETE", "DELETE_ALL",
+    "SAVED", "NO_PHOTOS", "CLOSE", "PHOTO", "FULL",
 ]
 STRINGS = {
-    "LANG_TITLE":  {"ZH": "选择语言", "EN": "Select Language", "JA": "言語を選択", "KO": "언어 선택", "RU": "Выберите язык"},
-    "MODE_CONFIG": {"ZH": "模式配置", "EN": "Mode Config",     "JA": "モード設定",   "KO": "모드 설정", "RU": "Настройки"},
-    "COLOR_MODE":  {"ZH": "色彩模式", "EN": "Color Mode",     "JA": "カラーモード", "KO": "컬러 모드", "RU": "Цветовой режим"},
-    "POWER_OFF":   {"ZH": "关机",     "EN": "Power Off",      "JA": "電源オフ",     "KO": "전원 끄기", "RU": "Выключение"},
-    "BACK":        {"ZH": "返回",     "EN": "Back",           "JA": "戻る",         "KO": "뒤로",       "RU": "Назад"},
-    "OK":          {"ZH": "确定",     "EN": "OK",             "JA": "決定",         "KO": "확인",       "RU": "OK"},
-    "POWER":       {"ZH": "电源",     "EN": "Power",          "JA": "電源",         "KO": "전원",       "RU": "Питание"},
-    "SELECT_FMT":  {"ZH": "选择: %s", "EN": "Select: %s",     "JA": "選択: %s",     "KO": "선택: %s",   "RU": "Выбор: %s"},
-    "CALIBRATING": {"ZH": "传感器校准中...", "EN": "Calibrating Sensor...", "JA": "センサー較正中...", "KO": "센서 보정 중...", "RU": "Калибровка..."},
+    "LANG_TITLE":  {"ZH": "选择语言", "EN": "Select Language", "RU": "Выберите язык", "JA": "言語を選択", "KO": "언어 선택"},
+    "MODE_CONFIG": {"ZH": "模式配置", "EN": "Mode Config",     "RU": "Настройки",       "JA": "モード設定",   "KO": "모드 설정"},
+    "COLOR_MODE":  {"ZH": "色彩模式", "EN": "Color Mode",     "RU": "Цветовой режим", "JA": "カラーモード", "KO": "컬러 모드"},
+    "POWER_OFF":   {"ZH": "关机",     "EN": "Power Off",      "RU": "Выключение",     "JA": "電源オフ",     "KO": "전원 끄기"},
+    "BACK":        {"ZH": "返回",     "EN": "Back",           "RU": "Назад",          "JA": "戻る",         "KO": "뒤로"},
+    "OK":          {"ZH": "确定",     "EN": "OK",             "RU": "OK",             "JA": "決定",         "KO": "확인"},
+    "POWER":       {"ZH": "电源",     "EN": "Power",          "RU": "Питание",        "JA": "電源",         "KO": "전원"},
+    "SELECT_FMT":  {"ZH": "选择: %s", "EN": "Select: %s",     "RU": "Выбор: %s",      "JA": "選択: %s",     "KO": "선택: %s"},
+    "CALIBRATING": {"ZH": "传感器校准中...", "EN": "Calibrating Sensor...", "RU": "Калибровка...", "JA": "センサー較正中...", "KO": "센서 보정 중..."},
+    "LANGUAGE":    {"ZH": "语言",     "EN": "Language",       "RU": "Язык",           "JA": "言語",         "KO": "언어"},
+    "CAPTURE":     {"ZH": "拍照",     "EN": "Capture",        "RU": "Снимок",         "JA": "撮影",         "KO": "촬영"},
+    "GALLERY":     {"ZH": "相册",     "EN": "Gallery",        "RU": "Галерея",        "JA": "アルバム",     "KO": "앨범"},
+    "DELETE":      {"ZH": "删除",     "EN": "Delete",         "RU": "Удалить",        "JA": "削除",         "KO": "삭제"},
+    "DELETE_ALL":  {"ZH": "全部删除", "EN": "Delete All",     "RU": "Удалить всё",    "JA": "すべて削除",   "KO": "전체 삭제"},
+    "SAVED":       {"ZH": "已保存",   "EN": "Saved",          "RU": "Сохранено",      "JA": "保存済み",     "KO": "저장됨"},
+    "NO_PHOTOS":   {"ZH": "暂无照片", "EN": "No Photos",      "RU": "Нет фото",       "JA": "写真なし",     "KO": "사진 없음"},
+    "CLOSE":       {"ZH": "关闭",     "EN": "Close",          "RU": "Закрыть",        "JA": "閉じる",       "KO": "닫기"},
+    "PHOTO":       {"ZH": "照片",     "EN": "Photo",          "RU": "Фото",           "JA": "写真",         "KO": "사진"},
+    "FULL":        {"ZH": "存储已满", "EN": "Storage Full",   "RU": "Нет места",      "JA": "容量不足",     "KO": "저장 공간 없음"},
 }
-LANG_NAMES = {"ZH": "中文", "EN": "English", "JA": "日本語", "KO": "한국어", "RU": "Русский"}
+LANG_NAMES = {"ZH": "中文", "EN": "English", "RU": "Русский", "JA": "日本語", "KO": "한국어"}
 
 # fonts to generate: lang -> (ttf path, index, size)
 FONT_SPECS = {
@@ -197,11 +210,8 @@ def gen_lang_header_and_data():
     H.append("#endif")
     H.append("")
     H.append("typedef enum {")
-    H.append("    LANG_ZH = 0,")
-    H.append("    LANG_EN,")
-    H.append("    LANG_JA,")
-    H.append("    LANG_KO,")
-    H.append("    LANG_RU,")
+    for i, l in enumerate(LANG_ORDER):
+        H.append("    LANG_%s%s," % (l, " = 0" if i == 0 else ""))
     H.append("    LANG_COUNT")
     H.append("} app_lang_t;")
     H.append("")

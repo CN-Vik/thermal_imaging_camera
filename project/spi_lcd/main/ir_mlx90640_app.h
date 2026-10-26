@@ -50,6 +50,10 @@ void ir_camera_task_main(void *pvParameters);
 void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp);
 void ir_camera_set_color_mode(ir_color_mode_t mode);
 ir_color_mode_t ir_camera_get_color_mode(void);
+const uint8_t *ir_camera_get_frame(void);
+void ir_camera_get_norm_matrix(uint8_t *out);
+void ir_camera_get_snapshot_range(float *min_t, float *max_t);
+void ir_camera_render_norm(const uint8_t *norm, ir_color_mode_t mode, uint16_t *dst);
 
 #ifdef __cplusplus
 }

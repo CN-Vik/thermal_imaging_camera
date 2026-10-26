@@ -21,6 +21,7 @@
 #include "dev_sys.h"
 #include "lang.h"
 #include "boot_ui.h"
+#include "photo.h"
 #include "esp_lcd_touch_cst816s.h"
 #include "driver/i2c_master.h"
 #include "esp_lcd_panel_st7789.h"
@@ -75,7 +76,7 @@ static const char *TAG = "thermal imaging_eg";
 #define EXAMPLE_LVGL_TICK_PERIOD_MS 2
 #define EXAMPLE_LVGL_TASK_MAX_DELAY_MS 500
 #define EXAMPLE_LVGL_TASK_MIN_DELAY_MS 1
-#define EXAMPLE_LVGL_TASK_STACK_SIZE (4 * 1024)
+#define EXAMPLE_LVGL_TASK_STACK_SIZE (8 * 1024)
 #define EXAMPLE_LVGL_TASK_PRIORITY 2
 
 static SemaphoreHandle_t lvgl_mux = NULL;
@@ -425,7 +426,7 @@ void app_main(void)
     indev_drv.type = LV_INDEV_TYPE_POINTER;
     indev_drv.disp = disp;
     indev_drv.read_cb = example_lvgl_touch_cb;
-    indev_drv.long_press_time = 500;// 长按 500ms 触发菜单（默认 400ms）
+    indev_drv.long_press_time = 600;// 长按 600ms 触发菜单（默认 400ms）
     indev_drv.user_data = tp;
     lv_indev_drv_register(&indev_drv);
     // ----------------------------
@@ -466,6 +467,7 @@ void app_main(void)
 
     /* ============ 开机 Logo + 首次开机语言选择 ============ */
     lang_init();
+    photo_init();
     boot_show_splash(disp);
     if (!lang_configured()) {
         boot_show_language_select(disp);

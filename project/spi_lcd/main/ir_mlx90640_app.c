@@ -118,6 +118,11 @@ const float rate_hz_table[] = {0.5f, 1.0f, 2.0f, 4.0f, 8.0f, 16.0f, 32.0f, 64.0f
 static uint16_t s_color_lut[256];
 static ir_color_mode_t s_cur_color_mode = THERMAL_COLOR_MODE;
 
+/* 归一化温度快照（供拍照压缩存储），每帧刷新 */
+static uint8_t s_norm_snapshot[MLX_RAW_PIXELS];
+static float   s_snapshot_min_t = 0.0f;
+static float   s_snapshot_max_t = 0.0f;
+
 static inline float clampf_local(float v, float lo, float hi)
 {
     if (v < lo) return lo;
@@ -479,6 +484,25 @@ ir_color_mode_t ir_camera_get_color_mode(void)
     return s_cur_color_mode;
 }
 
+/* 获取当前正在显示的热成像帧（240x280 RGB565），未就绪时返回 NULL */
+const uint8_t *ir_camera_get_frame(void)
+{
+    return s_thermal_img_dsc.data;
+}
+
+/* 复制当前归一化温度矩阵（32x24，每像素 0-255），供拍照压缩存储 */
+void ir_camera_get_norm_matrix(uint8_t *out)
+{
+    if (out) memcpy(out, s_norm_snapshot, sizeof(s_norm_snapshot));
+}
+
+/* 获取当前量程（供后续重归一化） */
+void ir_camera_get_snapshot_range(float *min_t, float *max_t)
+{
+    if (min_t) *min_t = s_snapshot_min_t;
+    if (max_t) *max_t = s_snapshot_max_t;
+}
+
 static inline void raw_rc_to_screen_xy(int raw_r, int raw_c, int *px_x, int *px_y)
 {
 #if IR_ROTATE_90
@@ -561,6 +585,16 @@ static void bilinear_scale_fullscreen_1to1(const uint8_t *src, int src_w, int sr
         }
 #endif
     }
+}
+
+/* 把归一化矩阵渲染为 240x280 RGB565（用指定色彩模式） */
+void ir_camera_render_norm(const uint8_t *norm, ir_color_mode_t mode, uint16_t *dst)
+{
+    if (!norm || !dst) return;
+    uint16_t lut[256];
+    ir_color_generate_lut(mode, lut);
+    bilinear_scale_fullscreen_1to1(norm, MLX_RAW_W, MLX_RAW_H,
+                                   dst, MLX_INTERP_W, MLX_INTERP_H, lut);
 }
 
 static inline void draw_diamond_marker(uint16_t *buf, int cx, int cy,
@@ -799,6 +833,9 @@ void ir_camera_task_main(void *pvParameters)
             // 7. 映射并进行双线性插值送显
             if (valid_pts > 400) {
                 temperature_to_norm_u8(spatial_temp, norm_matrix, smooth_min_t, smooth_max_t);
+                memcpy(s_norm_snapshot, norm_matrix, sizeof(s_norm_snapshot));
+                s_snapshot_min_t = smooth_min_t;
+                s_snapshot_max_t = smooth_max_t;
                 uint16_t *cur_write_buf = s_display_buf[s_back_idx];
 
                 bilinear_scale_fullscreen_1to1(

@@ -10,9 +10,9 @@ extern "C" {
 typedef enum {
     LANG_ZH = 0,
     LANG_EN,
+    LANG_RU,
     LANG_JA,
     LANG_KO,
-    LANG_RU,
     LANG_COUNT
 } app_lang_t;
 
@@ -26,6 +26,16 @@ typedef enum {
     STR_POWER,
     STR_SELECT_FMT,
     STR_CALIBRATING,
+    STR_LANGUAGE,
+    STR_CAPTURE,
+    STR_GALLERY,
+    STR_DELETE,
+    STR_DELETE_ALL,
+    STR_SAVED,
+    STR_NO_PHOTOS,
+    STR_CLOSE,
+    STR_PHOTO,
+    STR_FULL,
     STR_COUNT
 } lang_str_id_t;
 

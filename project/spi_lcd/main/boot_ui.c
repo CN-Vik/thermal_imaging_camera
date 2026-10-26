@@ -88,7 +88,7 @@ void boot_show_language_select(lv_disp_t *disp)
     lv_label_set_text(title, "Select Language");
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 26);
 
-    const app_lang_t order[LANG_COUNT] = { LANG_ZH, LANG_EN, LANG_JA, LANG_KO, LANG_RU };
+    const app_lang_t order[LANG_COUNT] = { LANG_ZH, LANG_EN, LANG_RU, LANG_JA, LANG_KO };
     int y = 60;
     for (int i = 0; i < LANG_COUNT; i++) {
         create_lang_btn(scr, order[i], y);
