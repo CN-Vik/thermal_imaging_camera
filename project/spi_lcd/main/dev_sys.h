@@ -26,6 +26,9 @@ void power_off_event_cb(lv_event_t *e);
 /* 彻底断电：拉低 IO36（可被 LVGL 开关等非 CLICKED 事件直接调用） */
 void sys_power_off(void);
 
+/* 启动自动关机定时器：seconds 秒后自动彻底断电（一次性） */
+void sys_start_auto_poweroff(uint32_t seconds);
+
 
 #ifdef __cplusplus
 }

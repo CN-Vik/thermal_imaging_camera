@@ -9,6 +9,7 @@
  * 
  */
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "driver/gpio.h"
 #include "esp_err.h"
 #include "esp_log.h"
@@ -68,6 +69,32 @@ void sys_power_off(void)
 {
     gpio_set_level(PIN_PWR_HOLD, 0);
     ESP_LOGI(TAG, "Power_Off_via_IO36!");
+}
+
+/* 自动关机定时器（esp_timer 实现，一次性） */
+static esp_timer_handle_t s_auto_off_timer = NULL;
+
+static void auto_poweroff_cb(void *arg)
+{
+    (void)arg;
+    ESP_LOGI(TAG, "auto power off timer fired");
+    sys_power_off();
+}
+
+void sys_start_auto_poweroff(uint32_t seconds)
+{
+    if (s_auto_off_timer) {
+        return; /* 已启动，避免重复 */
+    }
+    const esp_timer_create_args_t args = {
+        .callback = auto_poweroff_cb,
+        .name = "auto_off",
+        .dispatch_method = ESP_TIMER_TASK,
+    };
+    if (esp_timer_create(&args, &s_auto_off_timer) == ESP_OK) {
+        esp_timer_start_once(s_auto_off_timer, (uint64_t)seconds * 1000000ULL);
+        ESP_LOGI(TAG, "auto power off in %lu s", (unsigned long)seconds);
+    }
 }
 
 

@@ -468,6 +468,7 @@ void app_main(void)
     /* ============ 开机 Logo + 首次开机语言选择 ============ */
     lang_init();
     photo_init();
+    sys_start_auto_poweroff(20 * 60); /* 工作 20 分钟后自动关机 */
     boot_show_splash(disp);
     if (!lang_configured()) {
         boot_show_language_select(disp);
