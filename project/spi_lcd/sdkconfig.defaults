@@ -1,3 +1,6 @@
 CONFIG_LV_USE_USER_DATA=y
 CONFIG_LV_COLOR_16_SWAP=y
 CONFIG_LV_COLOR_DEPTH_16=y
+# 横屏软件旋转(sdraw_buf_rotate)需要额外的临时缓冲，32KB 池不够会触发 LVGL 断言死循环，
+# 这里加大到 80KB 保证 10KB 旋转缓冲 + 全部 UI 对象都能分配。
+CONFIG_LV_MEM_SIZE_KILOBYTES=80

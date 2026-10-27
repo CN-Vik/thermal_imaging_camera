@@ -59,17 +59,17 @@ static float emissivity = 0.95f;
 #define THERMAL_PERCENTILE_HIGH          95
 
 /*
- * 图像方向校准开关：
- * IR_ROTATE_90 = 1 : 将传感器坐标系旋转 90°，适配竖屏 PCB 安装 (24宽 -> 240, 32高 -> 280)
- * IR_MIRROR_X  = 0 : 若发现屏幕里左右手方向反了，在 0 和 1 之间切换
- * IR_MIRROR_Y  = 1 : 默认 1，将手腕旋转到屏幕底部
+ * 图像方向校准开关（横屏版）：
+ * IR_ROTATE_90 = 0 : 传感器原始 32宽x24高 直接映射到横屏 280宽x240高（自然方向）
+ * IR_MIRROR_X  = 0 : 若发现屏幕里左右方向反了，在 0 和 1 之间切换
+ * IR_MIRROR_Y  = 0 : 若发现画面上下颠倒，在 0 和 1 之间切换
  */
-#define IR_ROTATE_90                    1
+#define IR_ROTATE_90                    0
 #define IR_MIRROR_X                     0
-#define IR_MIRROR_Y                     1
+#define IR_MIRROR_Y                     0
 
-#define IR_SCREEN_W     240
-#define IR_SCREEN_H     280
+#define IR_SCREEN_W     280
+#define IR_SCREEN_H     240
 #define IR_TAG_GUESS_W  88
 #define IR_TAG_GUESS_H  22
 
@@ -484,7 +484,7 @@ ir_color_mode_t ir_camera_get_color_mode(void)
     return s_cur_color_mode;
 }
 
-/* 获取当前正在显示的热成像帧（240x280 RGB565），未就绪时返回 NULL */
+/* 获取当前正在显示的热成像帧（280x240 RGB565），未就绪时返回 NULL */
 const uint8_t *ir_camera_get_frame(void)
 {
     return s_thermal_img_dsc.data;
@@ -587,7 +587,7 @@ static void bilinear_scale_fullscreen_1to1(const uint8_t *src, int src_w, int sr
     }
 }
 
-/* 把归一化矩阵渲染为 240x280 RGB565（用指定色彩模式） */
+/* 把归一化矩阵渲染为 280x240 RGB565（用指定色彩模式） */
 void ir_camera_render_norm(const uint8_t *norm, ir_color_mode_t mode, uint16_t *dst)
 {
     if (!norm || !dst) return;
@@ -866,7 +866,7 @@ void ir_camera_task_main(void *pvParameters)
                     if (label_fps_float) lv_label_set_text(label_fps_float, text_fps);
                     if (label_info) lv_label_set_text(label_info, text_info);
 
-                    /* 温度气泡夹在屏幕内，防止超出 240x280 */
+                    /* 温度气泡夹在屏幕内，防止超出 280x240 */
                     place_temp_tag(tag_max, max_px_x, max_px_y, text_max_tag);
                     place_temp_tag(tag_min, min_px_x, min_px_y, text_min_tag);
 

@@ -69,6 +69,22 @@ static const char *TAG = "thermal imaging_eg";
 #define EXAMPLE_LCD_V_RES 280
 #define LCD_BUF_LINES 45 // 增大单次切片行数
 
+/* =============================================================================
+ * 屏幕方向配置（客户要求：物理屏是竖屏 240x280，但所有 UI 必须以横屏 280x240 呈现）
+ * -----------------------------------------------------------------------------
+ * 采用 LVGL 软件旋转：disp_drv.sw_rotate = 1 + LV_DISP_ROT_90
+ *  1. LVGL 逻辑分辨率自动变为 280x240，UI 全部按横屏坐标布局；
+ *  2. LVGL 负责像素旋转，并换算成物理坐标(240x280)回调 flush_cb，
+ *     面板保持原生竖屏配置（含下方 set_gap(0,20) 的 20px 偏移，勿动）；
+ *  3. 触摸坐标由 LVGL 自动旋转，无需修改触摸驱动；
+ *  4. 开机图/热像图方向若不对，先看这里：
+ *     - 整个画面上下颠倒：把 UI_DISP_ROTATION 改为 LV_DISP_ROT_270；
+ *     - 仅热像图方向不对：调 ir_mlx90640_app.c 里的 IR_MIRROR_X / IR_MIRROR_Y。
+ * ============================================================================= */
+#define UI_DISP_ROTATION   LV_DISP_ROT_90
+#define UI_SCREEN_W        280   // 横屏逻辑宽
+#define UI_SCREEN_H        240   // 横屏逻辑高
+
 // Bit number used to represent command and parameter
 #define EXAMPLE_LCD_CMD_BITS 8
 #define EXAMPLE_LCD_PARAM_BITS 8
@@ -152,59 +168,13 @@ static void example_lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_
     esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, color_map);
 }
 
-/* Rotate display and touch, when rotated screen in LVGL. Called when driver parameters are updated. */
-static void example_lvgl_port_update_callback(lv_disp_drv_t *drv)
-{
-    esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t)drv->user_data;
-
-    switch (drv->rotated)
-    {
-    case LV_DISP_ROT_NONE:
-        // Rotate LCD display
-        esp_lcd_panel_swap_xy(panel_handle, false);
-        esp_lcd_panel_mirror(panel_handle, true, false);
-#if CONFIG_EXAMPLE_LCD_TOUCH_ENABLED
-        // Rotate LCD touch
-        esp_lcd_touch_set_mirror_y(tp, false);
-        esp_lcd_touch_set_mirror_x(tp, false);
-#endif
-        break;
-    case LV_DISP_ROT_90:
-        // Rotate LCD display
-        esp_lcd_panel_swap_xy(panel_handle, true);
-        esp_lcd_panel_mirror(panel_handle, true, true);
-#if CONFIG_EXAMPLE_LCD_TOUCH_ENABLED
-        if (tp)
-        {
-            // Rotate LCD touch
-            esp_lcd_touch_set_mirror_y(tp, false);
-            esp_lcd_touch_set_mirror_x(tp, false);
-        }
-        
-#endif
-        break;
-    case LV_DISP_ROT_180:
-        // Rotate LCD display
-        esp_lcd_panel_swap_xy(panel_handle, false);
-        esp_lcd_panel_mirror(panel_handle, false, true);
-#if CONFIG_EXAMPLE_LCD_TOUCH_ENABLED
-        // Rotate LCD touch
-        esp_lcd_touch_set_mirror_y(tp, false);
-        esp_lcd_touch_set_mirror_x(tp, false);
-#endif
-        break;
-    case LV_DISP_ROT_270:
-        // Rotate LCD display
-        esp_lcd_panel_swap_xy(panel_handle, true);
-        esp_lcd_panel_mirror(panel_handle, false, false);
-#if CONFIG_EXAMPLE_LCD_TOUCH_ENABLED
-        // Rotate LCD touch
-        esp_lcd_touch_set_mirror_y(tp, false);
-        esp_lcd_touch_set_mirror_x(tp, false);
-#endif
-        break;
-    }
-}
+/* =============================================================================
+ * 注意：横屏方案使用 LVGL 软件旋转（sw_rotate = 1），LVGL 内部完成像素旋转，
+ * 并直接按物理坐标(240x280)回调 flush_cb。因此面板必须始终保持原生竖屏配置
+ * （swap_xy = false, mirror = false,false，即上面 init 后的状态），
+ * 不要再用 esp_lcd_panel_swap_xy / mirror 旋转面板，否则会双重旋转。
+ * 触摸坐标同样由 LVGL 自动旋转。
+ * ============================================================================= */
 
 #if CONFIG_EXAMPLE_LCD_TOUCH_ENABLED
 static void example_lvgl_touch_cb(lv_indev_drv_t *drv, lv_indev_data_t *data)
@@ -409,12 +379,14 @@ void app_main(void)
 
     ESP_LOGI(TAG, "Register display driver to LVGL");
     lv_disp_drv_init(&disp_drv);
-    disp_drv.hor_res = EXAMPLE_LCD_H_RES;
-    disp_drv.ver_res = EXAMPLE_LCD_V_RES;
+    disp_drv.hor_res = EXAMPLE_LCD_H_RES;   // 物理宽 240
+    disp_drv.ver_res = EXAMPLE_LCD_V_RES;   // 物理高 280
     disp_drv.flush_cb = example_lvgl_flush_cb;
-    disp_drv.drv_update_cb = example_lvgl_port_update_callback;
     disp_drv.draw_buf = &disp_buf;
     disp_drv.user_data = panel_handle;
+    /* 横屏：LVGL 软件旋转 90°，逻辑分辨率自动变为 280x240 */
+    disp_drv.rotated = UI_DISP_ROTATION;
+    disp_drv.sw_rotate = 1;
     // 注册显示设备
     lv_disp_t *disp = lv_disp_drv_register(&disp_drv);
 
@@ -426,7 +398,7 @@ void app_main(void)
     indev_drv.type = LV_INDEV_TYPE_POINTER;
     indev_drv.disp = disp;
     indev_drv.read_cb = example_lvgl_touch_cb;
-    indev_drv.long_press_time = 600;// 长按 600ms 触发菜单（默认 400ms）
+    indev_drv.long_press_time = 800;// 长按 800ms 触发菜单（防止左右滑动切色时误触弹窗）
     indev_drv.user_data = tp;
     lv_indev_drv_register(&indev_drv);
     // ----------------------------

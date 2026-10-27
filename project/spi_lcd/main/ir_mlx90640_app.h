@@ -17,9 +17,9 @@ extern "C" {
 #define MLX_W                   MLX_RAW_W
 #define MLX_H                   MLX_RAW_H
 
-// 热像图作为全屏底图铺满整块 ST7789 240x280 屏幕
-#define MLX_INTERP_W            240
-#define MLX_INTERP_H            280
+// 热像图作为全屏底图铺满整块 ST7789 240x280 物理屏（UI 已旋转为横屏 280x240）
+#define MLX_INTERP_W            280
+#define MLX_INTERP_H            240
 #define MLX_INTERP_PIXELS       (MLX_INTERP_W * MLX_INTERP_H)
 
 #define MLX90640_ADDR           0x33
