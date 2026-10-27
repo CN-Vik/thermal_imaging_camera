@@ -44,6 +44,7 @@ const char *lang_str(lang_str_id_t id);
 const lv_font_t *lang_font(void);
 const lv_font_t *lang_font_for(app_lang_t l);
 
+const uint8_t * app_font_get_bitmap_fix_odd_width(const lv_font_t * font, uint32_t unicode_letter);
 esp_err_t lang_init(void);
 app_lang_t lang_get(void);
 void lang_set(app_lang_t l);

@@ -853,9 +853,11 @@ static lv_font_fmt_txt_dsc_t font_dsc = {
     .cache = NULL,
 };
 
+extern const uint8_t * app_font_get_bitmap_fix_odd_width(const lv_font_t * font, uint32_t unicode_letter);
+
 const lv_font_t app_font_zh = {
     .get_glyph_dsc = lv_font_get_glyph_dsc_fmt_txt,
-    .get_glyph_bitmap = lv_font_get_bitmap_fmt_txt,
+    .get_glyph_bitmap = app_font_get_bitmap_fix_odd_width,
     .line_height = 17,
     .base_line = 3,
     .subpx = LV_FONT_SUBPX_NONE,
