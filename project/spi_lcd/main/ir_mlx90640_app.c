@@ -66,7 +66,7 @@ static float emissivity = 0.95f;
  */
 #define IR_ROTATE_90                    0
 #define IR_MIRROR_X                     0
-#define IR_MIRROR_Y                     0
+#define IR_MIRROR_Y                     1
 
 #define IR_SCREEN_W     280
 #define IR_SCREEN_H     240
