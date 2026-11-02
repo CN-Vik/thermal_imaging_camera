@@ -74,6 +74,9 @@ static lv_obj_t *s_body;
 static lv_obj_t *s_chart;
 static lv_chart_series_t *s_chart_series;
 static lv_obj_t *s_chart_status;
+#define CHART_AXIS_LBL_CNT 3
+static lv_obj_t *s_chart_ylbl[CHART_AXIS_LBL_CNT];
+static lv_obj_t *s_chart_xlbl[CHART_AXIS_LBL_CNT];
 static lv_obj_t *s_chart_src_btn[CHART_SRC_BTN_CNT];
 static lv_obj_t *s_chart_src_lbl[CHART_SRC_BTN_CNT];
 
@@ -534,6 +537,24 @@ static const char *chart_source_name(ir_chart_source_t s)
     }
 }
 
+/* Y 轴三档刻度：内部按 0.1 单位存，这里还原成当前配置的温度单位显示，顶部那档带单位 */
+static void chart_axis_update(lv_coord_t lo, lv_coord_t hi)
+{
+    if (!s_chart_ylbl[0]) return;
+
+    const char *unit = "C";
+    (void)ir_camera_convert_temp(0.0f, &unit);  /* 只取当前温度单位符号 */
+
+    char buf[CHART_AXIS_LBL_CNT][16];
+    snprintf(buf[0], sizeof(buf[0]), "%.1f%s", (double)(hi / 10.0f), unit);
+    snprintf(buf[1], sizeof(buf[1]), "%.1f", (double)(((hi + lo) / 2) / 10.0f));
+    snprintf(buf[2], sizeof(buf[2]), "%.1f", (double)(lo / 10.0f));
+
+    for (int i = 0; i < CHART_AXIS_LBL_CNT; i++) {
+        if (s_chart_ylbl[i]) lv_label_set_text(s_chart_ylbl[i], buf[i]);
+    }
+}
+
 static void chart_refresh(void)
 {
     if (s_current_page != PAGE_CHART || !s_chart || !s_chart_series) return;
@@ -571,6 +592,7 @@ static void chart_refresh(void)
     hi += 5;
 
     lv_chart_set_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, lo, hi);
+    chart_axis_update(lo, hi);
     lv_chart_set_all_value(s_chart, s_chart_series, LV_CHART_POINT_NONE);
     int first = IR_CHART_HISTORY_LEN - count;
     for (int i = 0; i < count; i++) {
@@ -657,6 +679,12 @@ static void chart_source_event_cb(lv_event_t *event)
     chart_refresh();
 }
 
+/* 曲线页几何：左侧留出 Y 轴刻度宽度，绘图区下方留一行 X 轴时间刻度 */
+#define CHART_AXIS_LEFT_W   40
+#define CHART_PLOT_W       228
+#define CHART_PLOT_H        60
+#define CHART_TOP           24
+
 static void render_chart_page(void)
 {
     create_page_title(lang_str(STR_CHART));
@@ -665,15 +693,21 @@ static void render_chart_page(void)
         s_chart_src_btn[i] = NULL;
         s_chart_src_lbl[i] = NULL;
     }
+    for (int i = 0; i < CHART_AXIS_LBL_CNT; i++) {
+        s_chart_ylbl[i] = NULL;
+        s_chart_xlbl[i] = NULL;
+    }
 
     s_chart = lv_chart_create(s_body);
     if (!s_chart) return;
-    lv_obj_set_size(s_chart, 256, 74);
-    lv_obj_align(s_chart, LV_ALIGN_TOP_MID, 0, 24);
+    lv_obj_set_size(s_chart, CHART_PLOT_W, CHART_PLOT_H);
+    lv_obj_set_pos(s_chart, CHART_AXIS_LEFT_W, CHART_TOP);
     lv_chart_set_type(s_chart, LV_CHART_TYPE_LINE);
     lv_chart_set_point_count(s_chart, IR_CHART_HISTORY_LEN);
     lv_chart_set_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 1000);
-    lv_chart_set_div_line_count(s_chart, 4, 6);
+    /* 3 条横向分隔线 = 25% / 50% / 75%，中间那条正好落在 Y 轴中点刻度上 */
+    lv_chart_set_div_line_count(s_chart, 3, 6);
+    lv_obj_set_style_pad_all(s_chart, 0, LV_PART_MAIN);
     lv_obj_set_style_line_width(s_chart, 2, LV_PART_ITEMS);
     lv_obj_set_style_size(s_chart, 0, LV_PART_INDICATOR);
     s_chart_series = lv_chart_add_series(s_chart, lv_color_hex(0xE53935),
@@ -685,11 +719,50 @@ static void render_chart_page(void)
     }
     lv_chart_set_all_value(s_chart, s_chart_series, LV_CHART_POINT_NONE);
 
-    lv_obj_t *src_label = lv_label_create(s_body);
-    lv_obj_set_style_text_color(src_label, lv_color_hex(UI_TEXT_DARK), LV_PART_MAIN);
-    lv_obj_set_style_text_font(src_label, lang_font(), LV_PART_MAIN);
-    lv_label_set_text(src_label, lang_str(STR_CHART_SOURCE));
-    lv_obj_align(src_label, LV_ALIGN_TOP_MID, 0, 100);
+    /* Y 轴刻度：与绘图区上 / 中 / 下三档分隔线对齐，顶部那档带当前温度单位 */
+    static const lv_coord_t y_axis_y[CHART_AXIS_LBL_CNT] = {
+        CHART_TOP - 8,
+        CHART_TOP + CHART_PLOT_H / 2 - 8,
+        CHART_TOP + CHART_PLOT_H - 8
+    };
+    for (int i = 0; i < CHART_AXIS_LBL_CNT; i++) {
+        lv_obj_t *lbl = lv_label_create(s_body);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(UI_TEXT_MID), LV_PART_MAIN);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, LV_PART_MAIN);
+        lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+        lv_obj_set_width(lbl, CHART_AXIS_LEFT_W - 4);
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
+        lv_label_set_text(lbl, "--");
+        lv_obj_set_pos(lbl, 0, y_axis_y[i]);
+        s_chart_ylbl[i] = lbl;
+    }
+
+    /* X 轴时间刻度：按采样周期换算整条曲线覆盖的秒数（60 点 × 500ms = 30s） */
+    int span_s = (IR_CHART_HISTORY_LEN * IR_CHART_SAMPLE_MS) / 1000;
+    char xbuf[CHART_AXIS_LBL_CNT][10];
+    snprintf(xbuf[0], sizeof(xbuf[0]), "-%ds", span_s);
+    snprintf(xbuf[1], sizeof(xbuf[1]), "-%ds", span_s / 2);
+    snprintf(xbuf[2], sizeof(xbuf[2]), "0s");
+
+    static const lv_coord_t x_axis_x[CHART_AXIS_LBL_CNT] = {
+        CHART_AXIS_LEFT_W,
+        CHART_AXIS_LEFT_W + CHART_PLOT_W / 2 - 20,
+        CHART_AXIS_LEFT_W + CHART_PLOT_W - 40
+    };
+    static const lv_text_align_t x_axis_align[CHART_AXIS_LBL_CNT] = {
+        LV_TEXT_ALIGN_LEFT, LV_TEXT_ALIGN_CENTER, LV_TEXT_ALIGN_RIGHT
+    };
+    for (int i = 0; i < CHART_AXIS_LBL_CNT; i++) {
+        lv_obj_t *lbl = lv_label_create(s_body);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(UI_TEXT_MID), LV_PART_MAIN);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, LV_PART_MAIN);
+        lv_obj_set_style_text_align(lbl, x_axis_align[i], LV_PART_MAIN);
+        lv_obj_set_width(lbl, 40);
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
+        lv_label_set_text(lbl, xbuf[i]);
+        lv_obj_set_pos(lbl, x_axis_x[i], CHART_TOP + CHART_PLOT_H + 2);
+        s_chart_xlbl[i] = lbl;
+    }
 
     for (int i = 0; i < CHART_SRC_BTN_CNT; i++) {
         ir_chart_source_t src = s_chart_src_order[i];
@@ -697,7 +770,7 @@ static void render_chart_page(void)
 
         lv_obj_t *btn = lv_btn_create(s_body);
         lv_obj_set_size(btn, 62, 26);
-        lv_obj_set_pos(btn, 10 + i * 66, 118);
+        lv_obj_set_pos(btn, 10 + i * 66, 104);
         lv_obj_set_style_radius(btn, 5, LV_PART_MAIN);
         lv_obj_set_style_shadow_width(btn, 0, LV_PART_MAIN);
         lv_obj_set_style_border_width(btn, 1, LV_PART_MAIN);
@@ -724,7 +797,7 @@ static void render_chart_page(void)
     lv_obj_set_style_text_color(s_chart_status, lv_color_hex(UI_TEXT_MID), LV_PART_MAIN);
     lv_obj_set_style_text_font(s_chart_status, lang_font(), LV_PART_MAIN);
     lv_label_set_text(s_chart_status, lang_str(STR_WAITING_SAMPLES));
-    lv_obj_align(s_chart_status, LV_ALIGN_TOP_MID, 0, 146);
+    lv_obj_align(s_chart_status, LV_ALIGN_TOP_MID, 0, 132);
 
     lv_obj_t *clear = create_blue_button(s_body, LV_SYMBOL_CLOSE, 92, 30,
                                          chart_clear_event_cb, NULL);

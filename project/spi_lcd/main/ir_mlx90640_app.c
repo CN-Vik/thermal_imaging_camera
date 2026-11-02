@@ -1188,7 +1188,7 @@ void ir_camera_task_main(void *pvParameters)
 
             int64_t chart_now_us = esp_timer_get_time();
             if (last_chart_us == 0 ||
-                chart_now_us - last_chart_us >= 500000) {
+                chart_now_us - last_chart_us >= (int64_t)IR_CHART_SAMPLE_MS * 1000) {
                 ir_camera_chart_push(chart_t);
                 last_chart_us = chart_now_us;
             }

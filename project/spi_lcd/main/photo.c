@@ -67,6 +67,16 @@ int photo_count(void)
     return cnt;
 }
 
+uint32_t photo_total_bytes(void)
+{
+    return s_part ? (uint32_t)s_part->size : 0;
+}
+
+uint32_t photo_used_bytes(void)
+{
+    return (uint32_t)photo_count() * (uint32_t)PHOTO_SLOT_SIZE;
+}
+
 static int find_free_slot(void)
 {
     for (int i = 0; i < photo_max(); i++) {

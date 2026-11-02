@@ -68,6 +68,8 @@ typedef enum {
 } ir_chart_source_t;
 
 #define IR_CHART_HISTORY_LEN    60
+/* 曲线采样周期（ms）：60 点 × 500ms = 30 秒时间窗口，曲线页 X 轴刻度由此换算 */
+#define IR_CHART_SAMPLE_MS      500
 
 typedef struct {
     ir_color_mode_t color_mode;

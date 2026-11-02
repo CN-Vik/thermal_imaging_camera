@@ -24,6 +24,12 @@ int photo_max(void);
 /* 当前已保存照片数 */
 int photo_count(void);
 
+/* 存储分区总容量（字节） */
+uint32_t photo_total_bytes(void);
+
+/* 存储分区已占用容量（字节）= 照片数 × 单张槽位大小 */
+uint32_t photo_used_bytes(void);
+
 /* 保存一帧：norm 为 32x24 归一化温度（768 字节） */
 esp_err_t photo_capture(const uint8_t *norm, int color_mode, float min_t, float max_t);
 
