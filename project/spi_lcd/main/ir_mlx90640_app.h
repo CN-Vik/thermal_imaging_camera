@@ -59,6 +59,14 @@ typedef enum {
     IR_FILTER_MAX
 } ir_filter_mode_t;
 
+typedef enum {
+    IR_CHART_SRC_CENTER = 0,
+    IR_CHART_SRC_FIXTURE,
+    IR_CHART_SRC_MAX,
+    IR_CHART_SRC_MIN,
+    IR_CHART_SRC_COUNT
+} ir_chart_source_t;
+
 #define IR_CHART_HISTORY_LEN    60
 
 typedef struct {
@@ -79,6 +87,7 @@ typedef struct {
     float emissivity;
     float gamma;
     float temperature_offset_c;
+    ir_chart_source_t chart_source;
 } ir_app_settings_t;
 
 extern ir_app_settings_t g_ir_settings;

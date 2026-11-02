@@ -12,6 +12,7 @@
 #include "MLX90640_I2C_Driver.h"
 #include "MLX90640_API.h"
 #include "ir_mlx90640_app.h"
+#include "lang.h"
 
 static const char *TAG = "mlx_app";
 
@@ -46,6 +47,7 @@ static const ir_app_settings_t s_default_settings = {
     .emissivity = 0.95f,
     .gamma = 1.50f,
     .temperature_offset_c = 0.0f,
+    .chart_source = IR_CHART_SRC_CENTER,
 };
 
 ir_app_settings_t g_ir_settings = {
@@ -66,6 +68,7 @@ ir_app_settings_t g_ir_settings = {
     .emissivity = 0.95f,
     .gamma = 1.50f,
     .temperature_offset_c = 0.0f,
+    .chart_source = IR_CHART_SRC_CENTER,
 };
 
 /*
@@ -618,6 +621,9 @@ static void settings_clamp_to_valid_ranges(void)
     if (g_ir_settings.filter_mode >= IR_FILTER_MAX) {
         g_ir_settings.filter_mode = IR_FILTER_BSPLINE;
     }
+    if (g_ir_settings.chart_source >= IR_CHART_SRC_COUNT) {
+        g_ir_settings.chart_source = IR_CHART_SRC_CENTER;
+    }
 
     g_ir_settings.fixture_px_x = (g_ir_settings.fixture_px_x < 0)
                                ? 0 : g_ir_settings.fixture_px_x;
@@ -1019,11 +1025,11 @@ void ir_camera_task_main(void *pvParameters)
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 
-    char text_info[96];
+    char text_info[128];
     char text_fps[32];
-    char text_max_tag[16];
-    char text_min_tag[16];
-    char text_fix_tag[16];
+    char text_max_tag[32];
+    char text_min_tag[32];
+    char text_fix_tag[32];
 
     uint32_t frame_count = 0;
     float real_fps = 0.0f;
@@ -1172,10 +1178,18 @@ void ir_camera_task_main(void *pvParameters)
             float fixture_t = spatial_temp[fixture_idx];
             float record_t = g_ir_settings.label_fixture ? fixture_t : center_t;
 
+            float chart_t = center_t;
+            switch (g_ir_settings.chart_source) {
+            case IR_CHART_SRC_FIXTURE: chart_t = fixture_t; break;
+            case IR_CHART_SRC_MAX: chart_t = cur_max; break;
+            case IR_CHART_SRC_MIN: chart_t = cur_min; break;
+            default: chart_t = center_t; break;
+            }
+
             int64_t chart_now_us = esp_timer_get_time();
             if (last_chart_us == 0 ||
                 chart_now_us - last_chart_us >= 500000) {
-                ir_camera_chart_push(record_t);
+                ir_camera_chart_push(chart_t);
                 last_chart_us = chart_now_us;
             }
 
@@ -1187,13 +1201,17 @@ void ir_camera_task_main(void *pvParameters)
 
             snprintf(text_fps, sizeof(text_fps), "%.1f FPS", real_fps);
             snprintf(text_info, sizeof(text_info),
-                     "MAX %.1f %s   MIN %.1f %s\n%s %.1f %s   DT %.1f %s",
-                     disp_max, unit, disp_min, unit,
-                     g_ir_settings.label_fixture ? "FIX" : "CEN",
-                     disp_record, unit, disp_dt, unit);
-            snprintf(text_max_tag, sizeof(text_max_tag), "MAX %.1f %s", disp_max, unit);
-            snprintf(text_min_tag, sizeof(text_min_tag), "MIN %.1f %s", disp_min, unit);
-            snprintf(text_fix_tag, sizeof(text_fix_tag), "FIX %.1f %s",
+                     "%s %.1f %s   %s %.1f %s\n%s %.1f %s   %s %.1f %s",
+                     lang_str(STR_MAX), disp_max, unit,
+                     lang_str(STR_MIN), disp_min, unit,
+                     g_ir_settings.label_fixture ? lang_str(STR_FIX) : lang_str(STR_CENTER),
+                     disp_record, unit, lang_str(STR_DT), disp_dt, unit);
+            snprintf(text_max_tag, sizeof(text_max_tag), "%s %.1f %s",
+                     lang_str(STR_MAX), disp_max, unit);
+            snprintf(text_min_tag, sizeof(text_min_tag), "%s %.1f %s",
+                     lang_str(STR_MIN), disp_min, unit);
+            snprintf(text_fix_tag, sizeof(text_fix_tag), "%s %.1f %s",
+                     lang_str(STR_FIX),
                      ir_camera_convert_temp(fixture_t, NULL), unit);
 
             // 7. 映射并进行双线性插值送显

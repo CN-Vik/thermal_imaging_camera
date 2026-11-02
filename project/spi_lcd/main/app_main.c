@@ -73,16 +73,15 @@ static const char *TAG = "thermal imaging_eg";
 /* =============================================================================
  * 屏幕方向配置（客户要求：物理屏是竖屏 240x280，但所有 UI 必须以横屏 280x240 呈现）
  * -----------------------------------------------------------------------------
- * 采用 LVGL 软件旋转：disp_drv.sw_rotate = 1 + LV_DISP_ROT_90
+ * 采用 LVGL 软件旋转：disp_drv.sw_rotate = 1 + LV_DISP_ROT_270
  *  1. LVGL 逻辑分辨率自动变为 280x240，UI 全部按横屏坐标布局；
  *  2. LVGL 负责像素旋转，并换算成物理坐标(240x280)回调 flush_cb，
  *     面板保持原生竖屏配置（含下方 set_gap(0,20) 的 20px 偏移，勿动）；
  *  3. 触摸坐标由 LVGL 自动旋转，无需修改触摸驱动；
- *  4. 开机图/热像图方向若不对，先看这里：
- *     - 整个画面上下颠倒：把 UI_DISP_ROTATION 改为 LV_DISP_ROT_270；
+ *  4. 整个画面相对默认横屏方向上下颠倒（180° 翻转），开机图/热像图/设置/欢迎界面随之一起翻转；
  *     - 仅热像图方向不对：调 ir_mlx90640_app.c 里的 IR_MIRROR_X / IR_MIRROR_Y。
  * ============================================================================= */
-#define UI_DISP_ROTATION   LV_DISP_ROT_90
+#define UI_DISP_ROTATION   LV_DISP_ROT_270
 #define UI_SCREEN_W        280   // 横屏逻辑宽
 #define UI_SCREEN_H        240   // 横屏逻辑高
 
@@ -385,7 +384,7 @@ void app_main(void)
     disp_drv.flush_cb = example_lvgl_flush_cb;
     disp_drv.draw_buf = &disp_buf;
     disp_drv.user_data = panel_handle;
-    /* 横屏：LVGL 软件旋转 90°，逻辑分辨率自动变为 280x240 */
+    /* 横屏：LVGL 软件旋转 270°（整体 180° 翻转），逻辑分辨率自动变为 280x240 */
     disp_drv.rotated = UI_DISP_ROTATION;
     disp_drv.sw_rotate = 1;
     // 注册显示设备

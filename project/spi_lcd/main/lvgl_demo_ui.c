@@ -150,28 +150,29 @@ static void ui_style_white_panel(lv_obj_t *obj, lv_opa_t bg_opa)
     lv_obj_set_style_radius(obj, 16, LV_PART_MAIN);
 }
 
-/* 列表条目：浅蓝底 + 浅蓝边 + 深蓝文字；按下变实心蓝 */
+/* 列表条目：白底 + 底部浅蓝分隔线 + 深蓝文字；按下变实心蓝（与设置菜单一致） */
 static void ui_style_list_item(lv_obj_t *btn)
 {
-    lv_obj_set_style_bg_color(btn, lv_color_hex(T_ITEM_BG), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(btn, lv_color_white(), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_border_width(btn, 1, LV_PART_MAIN);
-    lv_obj_set_style_border_color(btn, lv_color_hex(T_ITEM_BORDER), LV_PART_MAIN);
+    lv_obj_set_style_border_side(btn, LV_BORDER_SIDE_BOTTOM, LV_PART_MAIN);
+    lv_obj_set_style_border_color(btn, lv_color_hex(T_BORDER_LIGHT), LV_PART_MAIN);
     lv_obj_set_style_border_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
 
     lv_obj_set_style_bg_color(btn, lv_color_hex(T_PRIMARY), LV_STATE_PRESSED);
     lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_STATE_PRESSED);
-    lv_obj_set_style_border_color(btn, lv_color_hex(T_PRIMARY_DEEP), LV_STATE_PRESSED);
     lv_obj_set_style_text_color(btn, lv_color_white(), LV_STATE_PRESSED);
 }
 
-/* 危险条目（关机/删除）：浅红底红字，按下实心红 */
+/* 危险条目（关机/删除）：白底红字，按下实心红 */
 static void ui_style_danger_item(lv_obj_t *btn)
 {
-    lv_obj_set_style_bg_color(btn, lv_color_hex(T_DANGER_BG), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(btn, lv_color_white(), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_border_width(btn, 1, LV_PART_MAIN);
-    lv_obj_set_style_border_color(btn, lv_color_hex(T_DANGER_BORDER), LV_PART_MAIN);
+    lv_obj_set_style_border_side(btn, LV_BORDER_SIDE_BOTTOM, LV_PART_MAIN);
+    lv_obj_set_style_border_color(btn, lv_color_hex(T_BORDER_LIGHT), LV_PART_MAIN);
     lv_obj_set_style_border_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
 
     lv_obj_set_style_bg_color(btn, lv_color_hex(T_DANGER), LV_STATE_PRESSED);
@@ -282,7 +283,7 @@ static void menu_confirm_event_cb(lv_event_t *e)
 
     ir_camera_set_color_mode(s_pending_mode);
     if (label_title) {
-        lv_label_set_text_fmt(label_title, "MODE: %s", ir_color_get_mode_name(s_pending_mode));
+        lv_label_set_text_fmt(label_title, "%s: %s", lang_str(STR_MODE), ir_color_get_mode_name(s_pending_mode));
     }
     if (s_menu_backdrop) {
         lv_obj_add_flag(s_menu_backdrop, LV_OBJ_FLAG_HIDDEN);
@@ -297,7 +298,7 @@ static void palette_back_event_cb(lv_event_t *e)
     // 撤销预览，恢复进入菜单前的颜色模式
     ir_camera_set_color_mode(s_backup_mode);
     if (label_title) {
-        lv_label_set_text_fmt(label_title, "MODE: %s", ir_color_get_mode_name(s_backup_mode));
+        lv_label_set_text_fmt(label_title, "%s: %s", lang_str(STR_MODE), ir_color_get_mode_name(s_backup_mode));
     }
     menu_show_main();
 }
@@ -312,7 +313,7 @@ static void menu_backdrop_cancel_cb(lv_event_t *e)
     // 恢复进入菜单前的颜色
     ir_camera_set_color_mode(s_backup_mode);
     if (label_title) {
-        lv_label_set_text_fmt(label_title, "MODE: %s", ir_color_get_mode_name(s_backup_mode));
+        lv_label_set_text_fmt(label_title, "%s: %s", lang_str(STR_MODE), ir_color_get_mode_name(s_backup_mode));
     }
     if (s_menu_backdrop) {
         lv_obj_add_flag(s_menu_backdrop, LV_OBJ_FLAG_HIDDEN);
@@ -373,11 +374,11 @@ static lv_obj_t *create_list_container(lv_obj_t *panel, lv_coord_t w, lv_coord_t
     lv_obj_remove_style_all(cont);
     lv_obj_set_size(cont, w, h);
     lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, 30);
-    lv_obj_set_style_bg_color(cont, lv_color_hex(T_PAGE_BG), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(cont, lv_color_white(), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(cont, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_radius(cont, 10, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(cont, 6, LV_PART_MAIN);
-    lv_obj_set_style_pad_row(cont, 6, LV_PART_MAIN);
+    lv_obj_set_style_radius(cont, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(cont, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(cont, 0, LV_PART_MAIN);
     lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_scroll_dir(cont, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(cont, LV_SCROLLBAR_MODE_ACTIVE);
@@ -392,7 +393,7 @@ static lv_obj_t *create_list_entry(lv_obj_t *parent, const char *text, bool red,
     lv_obj_t *btn = lv_obj_create(parent);
     lv_obj_remove_style_all(btn);
     lv_obj_set_size(btn, w, h);
-    lv_obj_set_style_radius(btn, 10, LV_PART_MAIN);
+    lv_obj_set_style_radius(btn, 0, LV_PART_MAIN);
     if (red) {
         ui_style_danger_item(btn);
     } else {
@@ -843,7 +844,7 @@ static void cycle_color_mode(int direction)
     ir_camera_set_color_mode(next_mode);
 
     if (label_title) {
-        lv_label_set_text_fmt(label_title, "MODE: %s",
+        lv_label_set_text_fmt(label_title, "%s: %s", lang_str(STR_MODE),
                               ir_color_get_mode_name(next_mode));
     }
 }
@@ -888,7 +889,7 @@ static void screen_touch_event_cb(lv_event_t *e)
             if (abs(dx) > MENU_SWIPE_EXIT_DX && abs(dx) > abs(dy) * 2) {
                 ir_camera_set_color_mode(s_backup_mode);
                 if (label_title) {
-                    lv_label_set_text_fmt(label_title, "MODE: %s", ir_color_get_mode_name(s_backup_mode));
+                    lv_label_set_text_fmt(label_title, "%s: %s", lang_str(STR_MODE), ir_color_get_mode_name(s_backup_mode));
                 }
                 lv_obj_add_flag(s_menu_backdrop, LV_OBJ_FLAG_HIDDEN);
                 if (s_gallery_from_settings) {
@@ -1105,8 +1106,8 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
 
     label_title = lv_label_create(top_capsule);
     lv_obj_set_style_text_color(label_title, lv_color_hex(T_TEXT_DARK), LV_PART_MAIN);
-    lv_obj_set_style_text_font(label_title, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_label_set_text_fmt(label_title, "MODE: %s", ir_color_get_mode_name(ir_camera_get_color_mode()));
+    lv_obj_set_style_text_font(label_title, lang_font(), LV_PART_MAIN);
+    lv_label_set_text_fmt(label_title, "%s: %s", lang_str(STR_MODE), ir_color_get_mode_name(ir_camera_get_color_mode()));
     lv_obj_align(label_title, LV_ALIGN_CENTER, 0, 0);
 
     // 3. 左上角帧率小药丸（白底蓝字，位于标题下方一行，避免与顶部标题胶囊重叠）
@@ -1130,21 +1131,21 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
     // 5. 动态最高温与最低温指示气泡（白底，MAX 红 / MIN 蓝）
     tag_max = lv_label_create(ui_root);
     ui_style_pill(tag_max, T_DANGER, T_DANGER, LV_OPA_80);
-    lv_obj_set_style_text_font(tag_max, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(tag_max, lang_font(), LV_PART_MAIN);
     lv_obj_set_style_pad_hor(tag_max, 7, LV_PART_MAIN);
     lv_obj_set_style_pad_ver(tag_max, 2, LV_PART_MAIN);
     lv_label_set_text(tag_max, "");
 
     tag_min = lv_label_create(ui_root);
     ui_style_pill(tag_min, T_PRIMARY, T_PRIMARY, LV_OPA_80);
-    lv_obj_set_style_text_font(tag_min, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(tag_min, lang_font(), LV_PART_MAIN);
     lv_obj_set_style_pad_hor(tag_min, 7, LV_PART_MAIN);
     lv_obj_set_style_pad_ver(tag_min, 2, LV_PART_MAIN);
     lv_label_set_text(tag_min, "");
 
     tag_fix = lv_label_create(ui_root);
     ui_style_pill(tag_fix, 0x00A958, 0x007A3F, LV_OPA_80);
-    lv_obj_set_style_text_font(tag_fix, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(tag_fix, lang_font(), LV_PART_MAIN);
     lv_obj_set_style_pad_hor(tag_fix, 7, LV_PART_MAIN);
     lv_obj_set_style_pad_ver(tag_fix, 2, LV_PART_MAIN);
     lv_label_set_text(tag_fix, "");
