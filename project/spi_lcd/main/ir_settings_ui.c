@@ -73,10 +73,11 @@ static lv_obj_t *s_body;
 
 static lv_obj_t *s_chart;
 static lv_chart_series_t *s_chart_series;
-static lv_obj_t *s_chart_status;
 #define CHART_AXIS_LBL_CNT 3
 static lv_obj_t *s_chart_ylbl[CHART_AXIS_LBL_CNT];
 static lv_obj_t *s_chart_xlbl[CHART_AXIS_LBL_CNT];
+static lv_obj_t *s_chart_save_btn;
+static lv_timer_t *s_chart_save_hint;
 static lv_obj_t *s_chart_src_btn[CHART_SRC_BTN_CNT];
 static lv_obj_t *s_chart_src_lbl[CHART_SRC_BTN_CNT];
 
@@ -392,6 +393,7 @@ static void render_main_page(void)
     s_current_page = PAGE_MAIN;
     s_chart = NULL;
     s_chart_series = NULL;
+    s_chart_save_btn = NULL;
     s_sleep_value = NULL;
     lv_obj_clean(s_body);
 
@@ -567,7 +569,6 @@ static void chart_refresh(void)
 
     if (count == 0) {
         lv_chart_set_all_value(s_chart, s_chart_series, LV_CHART_POINT_NONE);
-        if (s_chart_status) lv_label_set_text(s_chart_status, lang_str(STR_WAITING_SAMPLES));
         lv_chart_refresh(s_chart);
         return;
     }
@@ -598,18 +599,6 @@ static void chart_refresh(void)
     for (int i = 0; i < count; i++) {
         s_chart_series->y_points[first + i] = pts[i];
     }
-    if (s_chart_status) {
-        const char *unit = "C";
-        float last = ir_camera_convert_temp(samples[count - 1], &unit);
-        if (!isfinite(last)) last = 0.0f;
-        /* 用标准 snprintf 而不是 lv_label_set_text_fmt：LVGL 内置 printf 若未开启
-           LV_SPRINTF_USE_FLOAT，%f 会导致后续参数错位（把 double 当 char* 解引用）。 */
-        char buf[64];
-        snprintf(buf, sizeof(buf), "%s %.1f %s   n=%d",
-                 chart_source_name(g_ir_settings.chart_source),
-                 (double)last, unit, count);
-        lv_label_set_text(s_chart_status, buf);
-    }
     lv_chart_refresh(s_chart);
 }
 
@@ -618,6 +607,17 @@ static void chart_clear_event_cb(lv_event_t *event)
     if (lv_event_get_code(event) != LV_EVENT_CLICKED) return;
     ir_camera_chart_clear();
     chart_refresh();
+}
+
+/* 保存后的确认反馈：临时把按钮图标换成 ✓ / ✕，1.2s 后恢复。
+   原来的状态文字行已删掉（给曲线让出高度），反馈改由按钮自身承担。 */
+static void chart_save_hint_reset_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    s_chart_save_hint = NULL;
+    if (!s_chart_save_btn) return;
+    lv_obj_t *lbl = lv_obj_get_child(s_chart_save_btn, 0);
+    if (lbl) lv_label_set_text(lbl, LV_SYMBOL_DOWNLOAD);
 }
 
 static void chart_save_event_cb(lv_event_t *event)
@@ -640,9 +640,17 @@ static void chart_save_event_cb(lv_event_t *event)
         nvs_close(handle);
     }
 
-    if (s_chart_status) {
-        lv_label_set_text(s_chart_status,
-                          err == ESP_OK ? "Snapshot saved" : "Save failed");
+    if (s_chart_save_btn) {
+        lv_obj_t *lbl = lv_obj_get_child(s_chart_save_btn, 0);
+        if (lbl) {
+            lv_label_set_text(lbl, err == ESP_OK ? LV_SYMBOL_OK : LV_SYMBOL_CLOSE);
+        }
+        if (s_chart_save_hint) {
+            lv_timer_del(s_chart_save_hint);
+            s_chart_save_hint = NULL;
+        }
+        s_chart_save_hint = lv_timer_create(chart_save_hint_reset_cb, 1200, NULL);
+        if (s_chart_save_hint) lv_timer_set_repeat_count(s_chart_save_hint, 1);
     }
 }
 
@@ -679,16 +687,15 @@ static void chart_source_event_cb(lv_event_t *event)
     chart_refresh();
 }
 
-/* 曲线页几何：左侧留出 Y 轴刻度宽度，绘图区下方留一行 X 轴时间刻度 */
+/* 曲线页几何：整页只留曲线 + 轴刻度 + 采样源按钮，绘图区尽量吃满可用高度 */
 #define CHART_AXIS_LEFT_W   40
-#define CHART_PLOT_W       228
-#define CHART_PLOT_H        60
-#define CHART_TOP           24
+#define CHART_PLOT_W       232
+#define CHART_PLOT_H       100
+#define CHART_TOP           12
 
 static void render_chart_page(void)
 {
-    create_page_title(lang_str(STR_CHART));
-
+    /* 不再画页面标题，把顶栏下方的空间全部让给曲线 */
     for (int i = 0; i < CHART_SRC_BTN_CNT; i++) {
         s_chart_src_btn[i] = NULL;
         s_chart_src_lbl[i] = NULL;
@@ -697,6 +704,7 @@ static void render_chart_page(void)
         s_chart_ylbl[i] = NULL;
         s_chart_xlbl[i] = NULL;
     }
+    s_chart_save_btn = NULL;
 
     s_chart = lv_chart_create(s_body);
     if (!s_chart) return;
@@ -770,7 +778,7 @@ static void render_chart_page(void)
 
         lv_obj_t *btn = lv_btn_create(s_body);
         lv_obj_set_size(btn, 62, 26);
-        lv_obj_set_pos(btn, 10 + i * 66, 104);
+        lv_obj_set_pos(btn, 10 + i * 66, 134);
         lv_obj_set_style_radius(btn, 5, LV_PART_MAIN);
         lv_obj_set_style_shadow_width(btn, 0, LV_PART_MAIN);
         lv_obj_set_style_border_width(btn, 1, LV_PART_MAIN);
@@ -793,18 +801,14 @@ static void render_chart_page(void)
         s_chart_src_lbl[i] = lbl;
     }
 
-    s_chart_status = lv_label_create(s_body);
-    lv_obj_set_style_text_color(s_chart_status, lv_color_hex(UI_TEXT_MID), LV_PART_MAIN);
-    lv_obj_set_style_text_font(s_chart_status, lang_font(), LV_PART_MAIN);
-    lv_label_set_text(s_chart_status, lang_str(STR_WAITING_SAMPLES));
-    lv_obj_align(s_chart_status, LV_ALIGN_TOP_MID, 0, 132);
-
+    /* 不再显示底部状态行（曲线来源 + 温度 + n=xx），把高度让给绘图区 */
     lv_obj_t *clear = create_blue_button(s_body, LV_SYMBOL_CLOSE, 92, 30,
                                          chart_clear_event_cb, NULL);
     lv_obj_align(clear, LV_ALIGN_BOTTOM_MID, -50, -6);
     lv_obj_t *save = create_blue_button(s_body, LV_SYMBOL_DOWNLOAD, 92, 30,
                                         chart_save_event_cb, NULL);
     lv_obj_align(save, LV_ALIGN_BOTTOM_MID, 50, -6);
+    s_chart_save_btn = save;
     chart_refresh();
 }
 
@@ -1403,7 +1407,12 @@ static void render_page(settings_page_t page)
     s_current_page = page;
     s_chart = NULL;
     s_chart_series = NULL;
-    s_chart_status = NULL;
+    s_chart_save_btn = NULL;
+    /* 页面即将重建：先回收“保存成功”提示定时器，避免它回调到已删除的按钮 */
+    if (s_chart_save_hint) {
+        lv_timer_del(s_chart_save_hint);
+        s_chart_save_hint = NULL;
+    }
     s_scale_box = NULL;
     s_sleep_value = NULL;
     lv_obj_clean(s_body);
