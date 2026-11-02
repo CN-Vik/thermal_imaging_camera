@@ -53,7 +53,6 @@ typedef enum {
     PAGE_EMISSIVITY,
     PAGE_GAMMA,
     PAGE_CALIBRATION,
-    PAGE_WEBPAGE,
     PAGE_LANGUAGE,
     PAGE_FACTORY_RESET,
     PAGE_ABOUT,
@@ -70,9 +69,17 @@ static const char * const s_scale_names[IR_SCALE_MAX] = {
 static lv_obj_t *s_root;
 static lv_obj_t *s_header;
 static lv_obj_t *s_body;
+#define CHART_SRC_BTN_CNT 4
+
 static lv_obj_t *s_chart;
 static lv_chart_series_t *s_chart_series;
 static lv_obj_t *s_chart_status;
+static lv_obj_t *s_chart_src_btn[CHART_SRC_BTN_CNT];
+static lv_obj_t *s_chart_src_lbl[CHART_SRC_BTN_CNT];
+
+static const ir_chart_source_t s_chart_src_order[CHART_SRC_BTN_CNT] = {
+    IR_CHART_SRC_CENTER, IR_CHART_SRC_FIXTURE, IR_CHART_SRC_MAX, IR_CHART_SRC_MIN
+};
 static lv_obj_t *s_scale_box;
 static lv_obj_t *s_sleep_value;
 static lv_timer_t *s_ui_timer;
@@ -403,7 +410,6 @@ static void render_main_page(void)
     add_menu_row(list, lang_str(STR_CALIBRATION), PAGE_CALIBRATION);
 
     add_group_header(list, lang_str(STR_OTHER));
-    add_menu_row(list, lang_str(STR_VISIT_WEBPAGE), PAGE_WEBPAGE);
     add_menu_row(list, lang_str(STR_LANGUAGE), PAGE_LANGUAGE);
     add_custom_menu_row(list, lang_str(STR_FACTORY_RESET), menu_item_event_cb,
                         (void *)(uintptr_t)PAGE_FACTORY_RESET, true);
@@ -535,42 +541,52 @@ static void chart_refresh(void)
     float samples[IR_CHART_HISTORY_LEN];
     int count = 0;
     ir_camera_chart_get_data(samples, &count);
-    if (count <= 0) {
+    if (count < 0) count = 0;
+    if (count > IR_CHART_HISTORY_LEN) count = IR_CHART_HISTORY_LEN;
+
+    if (count == 0) {
         lv_chart_set_all_value(s_chart, s_chart_series, LV_CHART_POINT_NONE);
         if (s_chart_status) lv_label_set_text(s_chart_status, lang_str(STR_WAITING_SAMPLES));
         lv_chart_refresh(s_chart);
         return;
     }
 
-    float min_value = 1000.0f;
-    float max_value = -1000.0f;
+    /* 先换算并限幅成 lv_coord_t，避免 NaN/Inf 转整型得到垃圾值后破坏量程 */
+    lv_coord_t pts[IR_CHART_HISTORY_LEN];
+    lv_coord_t lo = 0;
+    lv_coord_t hi = 0;
     for (int i = 0; i < count; i++) {
         float value = ir_camera_convert_temp(samples[i], NULL);
-        if (value < min_value) min_value = value;
-        if (value > max_value) max_value = value;
+        if (!isfinite(value)) value = 0.0f;
+        int scaled = (int)(value * 10.0f + (value >= 0.0f ? 0.5f : -0.5f));
+        if (scaled < -30000) scaled = -30000;
+        if (scaled > 30000) scaled = 30000;
+        pts[i] = (lv_coord_t)scaled;
+        if (i == 0 || pts[i] < lo) lo = pts[i];
+        if (i == 0 || pts[i] > hi) hi = pts[i];
     }
-    if (max_value - min_value < 3.0f) {
-        min_value -= 1.5f;
-        max_value += 1.5f;
-    }
+    /* 量程至少 2.0 个单位、上下各留 0.5，保证曲线不贴边且 ymax > ymin */
+    if (hi - lo < 20) hi = lo + 20;
+    lo -= 5;
+    hi += 5;
 
-    lv_chart_set_range(s_chart, LV_CHART_AXIS_PRIMARY_Y,
-                       (lv_coord_t)(min_value * 10.0f),
-                       (lv_coord_t)(max_value * 10.0f));
-    for (int i = 0; i < IR_CHART_HISTORY_LEN; i++) {
-        s_chart_series->y_points[i] = LV_CHART_POINT_NONE;
-    }
+    lv_chart_set_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, lo, hi);
+    lv_chart_set_all_value(s_chart, s_chart_series, LV_CHART_POINT_NONE);
     int first = IR_CHART_HISTORY_LEN - count;
     for (int i = 0; i < count; i++) {
-        s_chart_series->y_points[first + i] =
-            (lv_coord_t)(ir_camera_convert_temp(samples[i], NULL) * 10.0f);
+        s_chart_series->y_points[first + i] = pts[i];
     }
     if (s_chart_status) {
         const char *unit = "C";
         float last = ir_camera_convert_temp(samples[count - 1], &unit);
-        lv_label_set_text_fmt(s_chart_status, "%s %.1f %s   n=%d",
-                              chart_source_name(g_ir_settings.chart_source),
-                              last, unit, count);
+        if (!isfinite(last)) last = 0.0f;
+        /* 用标准 snprintf 而不是 lv_label_set_text_fmt：LVGL 内置 printf 若未开启
+           LV_SPRINTF_USE_FLOAT，%f 会导致后续参数错位（把 double 当 char* 解引用）。 */
+        char buf[64];
+        snprintf(buf, sizeof(buf), "%s %.1f %s   n=%d",
+                 chart_source_name(g_ir_settings.chart_source),
+                 (double)last, unit, count);
+        lv_label_set_text(s_chart_status, buf);
     }
     lv_chart_refresh(s_chart);
 }
@@ -608,22 +624,52 @@ static void chart_save_event_cb(lv_event_t *event)
     }
 }
 
+static void chart_source_restyle(void)
+{
+    for (int i = 0; i < CHART_SRC_BTN_CNT; i++) {
+        if (!s_chart_src_btn[i]) continue;
+        bool selected = (g_ir_settings.chart_source == s_chart_src_order[i]);
+        lv_obj_set_style_bg_color(s_chart_src_btn[i],
+                                  lv_color_hex(selected ? UI_BLUE : UI_WHITE),
+                                  LV_PART_MAIN);
+        if (s_chart_src_lbl[i]) {
+            lv_obj_set_style_text_color(s_chart_src_lbl[i],
+                                        lv_color_hex(selected ? UI_WHITE : UI_TEXT_DARK),
+                                        LV_PART_MAIN);
+        }
+    }
+}
+
+/* 只在原地切换高亮，不重建页面：避免重建过程中的内存分配与对象删除风险 */
 static void chart_source_event_cb(lv_event_t *event)
 {
     if (lv_event_get_code(event) != LV_EVENT_CLICKED) return;
-    g_ir_settings.chart_source =
-        (ir_chart_source_t)(uintptr_t)lv_event_get_user_data(event);
+
+    ir_chart_source_t src = (ir_chart_source_t)(uintptr_t)lv_event_get_user_data(event);
+    if (src >= IR_CHART_SRC_COUNT) return;
+    if (g_ir_settings.chart_source == src) return;
+
+    g_ir_settings.chart_source = src;
+    /* 换了采样源，旧采样值不再可比，直接清空历史 */
+    ir_camera_chart_clear();
+    chart_source_restyle();
     save_settings();
-    schedule_page(PAGE_CHART);
+    chart_refresh();
 }
 
 static void render_chart_page(void)
 {
     create_page_title(lang_str(STR_CHART));
 
+    for (int i = 0; i < CHART_SRC_BTN_CNT; i++) {
+        s_chart_src_btn[i] = NULL;
+        s_chart_src_lbl[i] = NULL;
+    }
+
     s_chart = lv_chart_create(s_body);
-    lv_obj_set_size(s_chart, 240, 70);
-    lv_obj_align(s_chart, LV_ALIGN_TOP_MID, 0, 25);
+    if (!s_chart) return;
+    lv_obj_set_size(s_chart, 256, 74);
+    lv_obj_align(s_chart, LV_ALIGN_TOP_MID, 0, 24);
     lv_chart_set_type(s_chart, LV_CHART_TYPE_LINE);
     lv_chart_set_point_count(s_chart, IR_CHART_HISTORY_LEN);
     lv_chart_set_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 1000);
@@ -632,24 +678,26 @@ static void render_chart_page(void)
     lv_obj_set_style_size(s_chart, 0, LV_PART_INDICATOR);
     s_chart_series = lv_chart_add_series(s_chart, lv_color_hex(0xE53935),
                                          LV_CHART_AXIS_PRIMARY_Y);
+    if (!s_chart_series) {
+        lv_obj_del(s_chart);
+        s_chart = NULL;
+        return;
+    }
     lv_chart_set_all_value(s_chart, s_chart_series, LV_CHART_POINT_NONE);
 
     lv_obj_t *src_label = lv_label_create(s_body);
     lv_obj_set_style_text_color(src_label, lv_color_hex(UI_TEXT_DARK), LV_PART_MAIN);
     lv_obj_set_style_text_font(src_label, lang_font(), LV_PART_MAIN);
     lv_label_set_text(src_label, lang_str(STR_CHART_SOURCE));
-    lv_obj_align(src_label, LV_ALIGN_TOP_MID, 0, 99);
+    lv_obj_align(src_label, LV_ALIGN_TOP_MID, 0, 100);
 
-    const ir_chart_source_t srcs[4] = {
-        IR_CHART_SRC_CENTER, IR_CHART_SRC_FIXTURE, IR_CHART_SRC_MAX, IR_CHART_SRC_MIN
-    };
-    for (int i = 0; i < 4; i++) {
-        ir_chart_source_t src = srcs[i];
+    for (int i = 0; i < CHART_SRC_BTN_CNT; i++) {
+        ir_chart_source_t src = s_chart_src_order[i];
         bool selected = (g_ir_settings.chart_source == src);
 
         lv_obj_t *btn = lv_btn_create(s_body);
-        lv_obj_set_size(btn, 54, 22);
-        lv_obj_set_pos(btn, 26 + i * 58, 118);
+        lv_obj_set_size(btn, 62, 26);
+        lv_obj_set_pos(btn, 10 + i * 66, 118);
         lv_obj_set_style_radius(btn, 5, LV_PART_MAIN);
         lv_obj_set_style_shadow_width(btn, 0, LV_PART_MAIN);
         lv_obj_set_style_border_width(btn, 1, LV_PART_MAIN);
@@ -661,18 +709,22 @@ static void render_chart_page(void)
                             (void *)(uintptr_t)src);
 
         lv_obj_t *lbl = lv_label_create(btn);
-        lv_obj_set_style_text_color(lbl, lv_color_hex(selected ? UI_WHITE : UI_TEXT_DARK),
-                                    LV_PART_MAIN);
         lv_obj_set_style_text_font(lbl, lang_font(), LV_PART_MAIN);
+        lv_obj_set_style_text_color(lbl,
+                                    lv_color_hex(selected ? UI_WHITE : UI_TEXT_DARK),
+                                    LV_PART_MAIN);
         lv_label_set_text(lbl, chart_source_name(src));
         lv_obj_center(lbl);
+
+        s_chart_src_btn[i] = btn;
+        s_chart_src_lbl[i] = lbl;
     }
 
     s_chart_status = lv_label_create(s_body);
     lv_obj_set_style_text_color(s_chart_status, lv_color_hex(UI_TEXT_MID), LV_PART_MAIN);
     lv_obj_set_style_text_font(s_chart_status, lang_font(), LV_PART_MAIN);
     lv_label_set_text(s_chart_status, lang_str(STR_WAITING_SAMPLES));
-    lv_obj_align(s_chart_status, LV_ALIGN_TOP_MID, 0, 144);
+    lv_obj_align(s_chart_status, LV_ALIGN_TOP_MID, 0, 146);
 
     lv_obj_t *clear = create_blue_button(s_body, LV_SYMBOL_CLOSE, 92, 30,
                                          chart_clear_event_cb, NULL);
@@ -965,8 +1017,10 @@ static void emissivity_event_cb(lv_event_t *event)
     g_ir_settings.emissivity = (float)lv_slider_get_value(slider) / 100.0f;
     lv_obj_t *label = (lv_obj_t *)lv_event_get_user_data(event);
     if (label) {
-        lv_label_set_text_fmt(label, "%s: %.2f", lang_str(STR_EMISSIVITY),
-                              g_ir_settings.emissivity);
+        char buf[48];
+        snprintf(buf, sizeof(buf), "%s: %.2f", lang_str(STR_EMISSIVITY),
+                 (double)g_ir_settings.emissivity);
+        lv_label_set_text(label, buf);
     }
     if (lv_event_get_code(event) == LV_EVENT_RELEASED) save_settings();
 }
@@ -978,8 +1032,12 @@ static void render_emissivity_page(void)
     lv_obj_t *label = lv_label_create(s_body);
     lv_obj_set_style_text_color(label, lv_color_hex(UI_TEXT_DARK), LV_PART_MAIN);
     lv_obj_set_style_text_font(label, lang_font(), LV_PART_MAIN);
-    lv_label_set_text_fmt(label, "%s: %.2f", lang_str(STR_EMISSIVITY),
-                          g_ir_settings.emissivity);
+    {
+        char buf[48];
+        snprintf(buf, sizeof(buf), "%s: %.2f", lang_str(STR_EMISSIVITY),
+                 (double)g_ir_settings.emissivity);
+        lv_label_set_text(label, buf);
+    }
     lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 78);
 
     lv_obj_t *slider = lv_slider_create(s_body);
@@ -1008,8 +1066,10 @@ static void gamma_event_cb(lv_event_t *event)
     g_ir_settings.gamma = (float)lv_slider_get_value(slider) / 100.0f;
     lv_obj_t *label = (lv_obj_t *)lv_event_get_user_data(event);
     if (label) {
-        lv_label_set_text_fmt(label, "%s: %.2f", lang_str(STR_GAMMA),
-                              g_ir_settings.gamma);
+        char buf[48];
+        snprintf(buf, sizeof(buf), "%s: %.2f", lang_str(STR_GAMMA),
+                 (double)g_ir_settings.gamma);
+        lv_label_set_text(label, buf);
     }
     if (lv_event_get_code(event) == LV_EVENT_RELEASED) save_settings();
 }
@@ -1021,8 +1081,12 @@ static void render_gamma_page(void)
     lv_obj_t *label = lv_label_create(s_body);
     lv_obj_set_style_text_color(label, lv_color_hex(UI_TEXT_DARK), LV_PART_MAIN);
     lv_obj_set_style_text_font(label, lang_font(), LV_PART_MAIN);
-    lv_label_set_text_fmt(label, "%s: %.2f", lang_str(STR_GAMMA),
-                          g_ir_settings.gamma);
+    {
+        char buf[48];
+        snprintf(buf, sizeof(buf), "%s: %.2f", lang_str(STR_GAMMA),
+                 (double)g_ir_settings.gamma);
+        lv_label_set_text(label, buf);
+    }
     lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 78);
 
     lv_obj_t *slider = lv_slider_create(s_body);
@@ -1052,8 +1116,10 @@ static void calibration_event_cb(lv_event_t *event)
         (float)lv_slider_get_value(slider) / 10.0f;
     lv_obj_t *label = (lv_obj_t *)lv_event_get_user_data(event);
     if (label) {
-        lv_label_set_text_fmt(label, "%s: %+.1f C", lang_str(STR_OFFSET),
-                              g_ir_settings.temperature_offset_c);
+        char buf[48];
+        snprintf(buf, sizeof(buf), "%s: %+.1f C", lang_str(STR_OFFSET),
+                 (double)g_ir_settings.temperature_offset_c);
+        lv_label_set_text(label, buf);
     }
     if (lv_event_get_code(event) == LV_EVENT_RELEASED) save_settings();
 }
@@ -1081,8 +1147,12 @@ static void render_calibration_page(void)
     lv_obj_t *label = lv_label_create(s_body);
     lv_obj_set_style_text_color(label, lv_color_hex(UI_TEXT_DARK), LV_PART_MAIN);
     lv_obj_set_style_text_font(label, lang_font(), LV_PART_MAIN);
-    lv_label_set_text_fmt(label, "%s: %+.1f C", lang_str(STR_OFFSET),
-                          g_ir_settings.temperature_offset_c);
+    {
+        char buf[48];
+        snprintf(buf, sizeof(buf), "%s: %+.1f C", lang_str(STR_OFFSET),
+                 (double)g_ir_settings.temperature_offset_c);
+        lv_label_set_text(label, buf);
+    }
     lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 84);
 
     lv_obj_t *slider = lv_slider_create(s_body);
@@ -1101,35 +1171,6 @@ static void render_calibration_page(void)
     lv_obj_t *reset = create_blue_text_button(s_body, lang_str(STR_RESET_OFFSET), 128, 38,
                                               calibration_reset_event_cb, NULL);
     lv_obj_align(reset, LV_ALIGN_BOTTOM_MID, 0, -12);
-}
-
-static void webpage_check_event_cb(lv_event_t *event)
-{
-    if (lv_event_get_code(event) != LV_EVENT_CLICKED) return;
-    lv_obj_t *label = (lv_obj_t *)lv_event_get_user_data(event);
-    if (label) {
-        lv_label_set_text(label,
-                          "Wi-Fi provisioning is not enabled\nin this firmware build.");
-    }
-}
-
-static void render_webpage_page(void)
-{
-    create_page_title(lang_str(STR_VISIT_WEBPAGE));
-
-    lv_obj_t *label = lv_label_create(s_body);
-    lv_obj_set_style_text_color(label, lv_color_hex(UI_TEXT_MID), LV_PART_MAIN);
-    lv_obj_set_style_text_font(label, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-    lv_label_set_text(label,
-                      "This camera has no browser or Wi-Fi\n"
-                      "credentials configured.");
-    lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 54);
-
-    lv_obj_t *button = create_blue_text_button(s_body, lang_str(STR_CHECK_CONNECTION),
-                                               160, 40,
-                                               webpage_check_event_cb, label);
-    lv_obj_align(button, LV_ALIGN_BOTTOM_MID, 0, -18);
 }
 
 static void language_async_cb(void *user_data)
@@ -1151,53 +1192,59 @@ static void render_language_page(void)
 {
     create_page_title(lang_str(STR_LANGUAGE));
 
+    /* 整行铺满屏宽、行高 34px，点击面积比原来的小按钮大得多；
+       当前语言用主题蓝高亮 + 右侧勾选标记，一眼就能看出选了哪个。 */
     lv_obj_t *list = lv_obj_create(s_body);
     style_reset(list);
     lv_obj_add_flag(list, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_size(list, 208, 154);
-    lv_obj_align(list, LV_ALIGN_TOP_MID, 0, 31);
+    lv_obj_set_size(list, SETTINGS_W, SETTINGS_BODY_H - 28);
+    lv_obj_set_pos(list, 0, 28);
     lv_obj_set_style_bg_color(list, lv_color_white(), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(list, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_border_width(list, 1, LV_PART_MAIN);
+    lv_obj_set_style_border_side(list, LV_BORDER_SIDE_TOP, LV_PART_MAIN);
     lv_obj_set_style_border_color(list, lv_color_hex(UI_LINE_GRAY), LV_PART_MAIN);
-    lv_obj_set_style_radius(list, 8, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(list, 6, LV_PART_MAIN);
-    lv_obj_set_style_pad_row(list, 4, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(list, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(list, 0, LV_PART_MAIN);
     lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_scroll_dir(list, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_ON);
+    lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_AUTO);
 
-    const app_lang_t order[LANG_COUNT] = { LANG_EN, LANG_ZH, LANG_RU, LANG_JA, LANG_KO };
+    const app_lang_t order[LANG_COUNT] = { LANG_ZH, LANG_EN, LANG_RU, LANG_JA, LANG_KO };
     for (int i = 0; i < LANG_COUNT; i++) {
         app_lang_t language = order[i];
-        lv_obj_t *button = lv_btn_create(list);
-        lv_obj_set_size(button, 188, 30);
-        lv_obj_set_style_bg_color(button, lv_color_white(), LV_PART_MAIN);
-        lv_obj_set_style_bg_color(button, lv_color_hex(UI_BLUE_LIGHT),
-                                  LV_STATE_PRESSED);
-        lv_obj_set_style_radius(button, 6, LV_PART_MAIN);
-        lv_obj_set_style_shadow_width(button, 0, LV_PART_MAIN);
-        lv_obj_set_style_border_width(button, 0, LV_PART_MAIN);
-        lv_obj_add_event_cb(button, language_event_cb, LV_EVENT_CLICKED,
+        bool selected = (lang_get() == language);
+
+        lv_obj_t *row = lv_btn_create(list);
+        lv_obj_set_size(row, SETTINGS_W, 34);
+        lv_obj_set_style_radius(row, 0, LV_PART_MAIN);
+        lv_obj_set_style_shadow_width(row, 0, LV_PART_MAIN);
+        lv_obj_set_style_border_width(row, 1, LV_PART_MAIN);
+        lv_obj_set_style_border_side(row, LV_BORDER_SIDE_BOTTOM, LV_PART_MAIN);
+        lv_obj_set_style_border_color(row, lv_color_hex(UI_LINE_GRAY), LV_PART_MAIN);
+        lv_obj_set_style_bg_color(row, lv_color_hex(selected ? UI_BLUE : UI_WHITE),
+                                  LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(row, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(row, lv_color_hex(UI_BLUE), LV_STATE_PRESSED);
+        lv_obj_set_style_bg_opa(row, LV_OPA_COVER, LV_STATE_PRESSED);
+        lv_obj_add_event_cb(row, language_event_cb, LV_EVENT_CLICKED,
                             (void *)(uintptr_t)language);
 
-        lv_obj_t *dot = lv_obj_create(button);
-        style_reset(dot);
-        lv_obj_set_size(dot, 12, 12);
-        lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-        lv_obj_set_style_bg_color(dot,
-                                  lv_color_hex(lang_get() == language
-                                                   ? UI_BLUE : UI_WHITE),
-                                  LV_PART_MAIN);
-        lv_obj_set_style_border_width(dot, 2, LV_PART_MAIN);
-        lv_obj_set_style_border_color(dot, lv_color_hex(UI_BLUE), LV_PART_MAIN);
-        lv_obj_align(dot, LV_ALIGN_LEFT_MID, 10, 0);
-
-        lv_obj_t *label = lv_label_create(button);
-        lv_obj_set_style_text_color(label, lv_color_hex(UI_TEXT_DARK), LV_PART_MAIN);
+        lv_obj_t *label = lv_label_create(row);
         lv_obj_set_style_text_font(label, lang_font_for(language), LV_PART_MAIN);
+        lv_obj_set_style_text_color(label,
+                                    lv_color_hex(selected ? UI_WHITE : UI_TEXT_DARK),
+                                    LV_PART_MAIN);
         lv_label_set_text(label, lang_name(language));
-        lv_obj_align(label, LV_ALIGN_LEFT_MID, 32, 0);
+        lv_obj_align(label, LV_ALIGN_LEFT_MID, 16, 0);
+
+        if (selected) {
+            lv_obj_t *check = lv_label_create(row);
+            lv_obj_set_style_text_font(check, &lv_font_montserrat_14, LV_PART_MAIN);
+            lv_obj_set_style_text_color(check, lv_color_white(), LV_PART_MAIN);
+            lv_label_set_text(check, LV_SYMBOL_OK);
+            lv_obj_align(check, LV_ALIGN_RIGHT_MID, -16, 0);
+        }
     }
 }
 
@@ -1301,7 +1348,6 @@ static void render_page(settings_page_t page)
     case PAGE_EMISSIVITY: render_emissivity_page(); break;
     case PAGE_GAMMA: render_gamma_page(); break;
     case PAGE_CALIBRATION: render_calibration_page(); break;
-    case PAGE_WEBPAGE: render_webpage_page(); break;
     case PAGE_LANGUAGE: render_language_page(); break;
     case PAGE_FACTORY_RESET: render_factory_reset_page(); break;
     case PAGE_ABOUT: render_about_page(); break;

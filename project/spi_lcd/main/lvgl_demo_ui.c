@@ -1122,7 +1122,7 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
     lv_obj_set_style_pad_hor(tag_emissivity, 8, LV_PART_MAIN);
     lv_obj_set_style_pad_ver(tag_emissivity, 2, LV_PART_MAIN);
     lv_obj_align(tag_emissivity, LV_ALIGN_TOP_RIGHT, -6, 34);
-    lv_label_set_text_fmt(tag_emissivity, "e:%.2f", g_ir_settings.emissivity);
+    lv_label_set_text(tag_emissivity, "");
 
     // 5. 动态最高温与最低温指示气泡（白底，MAX 红 / MIN 蓝）
     tag_max = lv_label_create(ui_root);

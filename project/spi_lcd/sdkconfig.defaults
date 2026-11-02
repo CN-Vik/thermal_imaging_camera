@@ -1,6 +1,12 @@
 CONFIG_LV_USE_USER_DATA=y
 CONFIG_LV_COLOR_16_SWAP=y
 CONFIG_LV_COLOR_DEPTH_16=y
-# 横屏软件旋转需要额外临时缓冲；新增多级设置页后对象数量明显增加，
-# 128KB 同时覆盖旋转缓冲和完整设置界面，避免打开菜单时 LVGL 内存断言重启。
-CONFIG_LV_MEM_SIZE_KILOBYTES=128
+# LVGL 内置内存池上限只有 128KB（Kconfig range 2..128），设置页对象 + 横屏旋转缓冲
+# 早已吃满：任何后续分配（新建页面/异步回调）都会触发 LV_ASSERT_MALLOC 直接重启。
+# 改用自定义分配器（newlib malloc/free -> ESP-IDF 系统堆），内存按需增长，
+# 同时省下 128KB 内部 RAM 的静态占用。
+CONFIG_LV_MEM_CUSTOM=y
+CONFIG_LV_MEM_CUSTOM_INCLUDE="stdlib.h"
+# LVGL 自带 printf 默认不含 %f 支持，遇到 "%s %.1f %s %d" 这种浮点后面还跟参数的
+# 格式串会 va_list 错位，把 double 当 char* 解引用 -> LoadProhibited 重启。
+CONFIG_LV_SPRINTF_USE_FLOAT=y

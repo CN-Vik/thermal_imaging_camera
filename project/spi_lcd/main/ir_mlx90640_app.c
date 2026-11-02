@@ -1263,8 +1263,10 @@ void ir_camera_task_main(void *pvParameters)
                     if (label_fps_float) lv_label_set_text(label_fps_float, text_fps);
                     if (label_info) lv_label_set_text(label_info, text_info);
                     if (tag_emissivity) {
-                        lv_label_set_text_fmt(tag_emissivity, "e:%.2f",
-                                              g_ir_settings.emissivity);
+                        char ebuf[24];
+                        snprintf(ebuf, sizeof(ebuf), "e:%.2f",
+                                 (double)g_ir_settings.emissivity);
+                        lv_label_set_text(tag_emissivity, ebuf);
                     }
 
                     /* 温度气泡夹在屏幕内，防止超出 280x240 */
