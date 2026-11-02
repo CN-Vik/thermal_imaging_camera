@@ -8,15 +8,65 @@
 #include "esp_timer.h"
 #include "driver/i2c_master.h"
 #include "esp_heap_caps.h"
+#include "nvs.h"
 #include "MLX90640_I2C_Driver.h"
 #include "MLX90640_API.h"
 #include "ir_mlx90640_app.h"
 
-
 static const char *TAG = "mlx_app";
 
 TaskHandle_t ir_task_Handle = NULL;
-static float emissivity = 0.95f;
+
+#define IR_SETTINGS_NVS_NAMESPACE "ir_settings"
+#define IR_SETTINGS_NVS_KEY       "app"
+#define IR_SETTINGS_MAGIC         0x49525354U
+#define IR_SETTINGS_VERSION       1U
+
+typedef struct {
+    uint32_t magic;
+    uint32_t version;
+    ir_app_settings_t settings;
+} ir_settings_nvs_blob_t;
+
+static const ir_app_settings_t s_default_settings = {
+    .color_mode = IR_COLOR_IRONBOW,
+    .color_reverse = false,
+    .label_coldest = true,
+    .label_hottest = true,
+    .label_fixture = false,
+    .fixture_px_x = MLX_INTERP_W / 2,
+    .fixture_px_y = MLX_INTERP_H / 2,
+    .rotate = IR_ROT_0,
+    .mirror_vertical = true,
+    .mirror_horizontal = false,
+    .temp_scale = IR_SCALE_CELSIUS,
+    .brightness = 50,
+    .auto_sleep_min = 30,
+    .filter_mode = IR_FILTER_BSPLINE,
+    .emissivity = 0.95f,
+    .gamma = 1.50f,
+    .temperature_offset_c = 0.0f,
+};
+
+ir_app_settings_t g_ir_settings = {
+    .color_mode = IR_COLOR_IRONBOW,
+    .color_reverse = false,
+    .label_coldest = true,
+    .label_hottest = true,
+    .label_fixture = false,
+    .fixture_px_x = MLX_INTERP_W / 2,
+    .fixture_px_y = MLX_INTERP_H / 2,
+    .rotate = IR_ROT_0,
+    .mirror_vertical = true,
+    .mirror_horizontal = false,
+    .temp_scale = IR_SCALE_CELSIUS,
+    .brightness = 50,
+    .auto_sleep_min = 30,
+    .filter_mode = IR_FILTER_BSPLINE,
+    .emissivity = 0.95f,
+    .gamma = 1.50f,
+    .temperature_offset_c = 0.0f,
+};
 
 /*
  * 当前颜色模式：
@@ -58,16 +108,6 @@ static float emissivity = 0.95f;
 #define THERMAL_PERCENTILE_LOW           5
 #define THERMAL_PERCENTILE_HIGH          95
 
-/*
- * 图像方向校准开关（横屏版）：
- * IR_ROTATE_90 = 0 : 传感器原始 32宽x24高 直接映射到横屏 280宽x240高（自然方向）
- * IR_MIRROR_X  = 0 : 若发现屏幕里左右方向反了，在 0 和 1 之间切换
- * IR_MIRROR_Y  = 0 : 若发现画面上下颠倒，在 0 和 1 之间切换
- */
-#define IR_ROTATE_90                    0
-#define IR_MIRROR_X                     0
-#define IR_MIRROR_Y                     1
-
 #define IR_SCREEN_W     280
 #define IR_SCREEN_H     240
 #define IR_TAG_GUESS_W  88
@@ -96,9 +136,10 @@ static void place_temp_tag(lv_obj_t *tag, int px, int py, const char *text)
     lv_obj_set_pos(tag, x, y);
 }
 
-/* X/Y 独立全视野定点数缩放步进 */
-static uint32_t s_scale_x_fp = 0;
-static uint32_t s_scale_y_fp = 0;
+/* 当前旋转/镜像生效后的源图像缩放步进 */
+static uint32_t s_source_col_step_fp = 0;
+static uint32_t s_source_row_step_fp = 0;
+static bool s_transform_valid = false;
 
 static uint16_t *s_display_buf[2] = {NULL, NULL};
 static uint8_t  s_back_idx = 0;
@@ -123,7 +164,19 @@ static uint8_t s_norm_snapshot[MLX_RAW_PIXELS];
 static float   s_snapshot_min_t = 0.0f;
 static float   s_snapshot_max_t = 0.0f;
 
+static float s_chart_buf[IR_CHART_HISTORY_LEN];
+static int s_chart_head = 0;
+static int s_chart_count = 0;
+static portMUX_TYPE s_chart_mux = portMUX_INITIALIZER_UNLOCKED;
+
 static inline float clampf_local(float v, float lo, float hi)
+{
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+static inline int clamp_int_local(int v, int lo, int hi)
 {
     if (v < lo) return lo;
     if (v > hi) return hi;
@@ -407,6 +460,73 @@ static void spatial_bilateral_denoise(const float *src, float *dst, int w, int h
     }
 }
 
+static void spatial_gaussian_denoise(const float *src, float *dst, int w, int h)
+{
+    static const float kernel[3][3] = {
+        {1.0f, 2.0f, 1.0f},
+        {2.0f, 4.0f, 2.0f},
+        {1.0f, 2.0f, 1.0f},
+    };
+
+    for (int r = 0; r < h; r++) {
+        for (int c = 0; c < w; c++) {
+            float sum = 0.0f;
+            float weight_sum = 0.0f;
+            float center = src[r * w + c];
+
+            for (int dy = -1; dy <= 1; dy++) {
+                int rr = r + dy;
+                if (rr < 0) rr = 0;
+                if (rr >= h) rr = h - 1;
+
+                for (int dx = -1; dx <= 1; dx++) {
+                    int cc = c + dx;
+                    if (cc < 0) cc = 0;
+                    if (cc >= w) cc = w - 1;
+
+                    float value = src[rr * w + cc];
+                    if (!isfinite(value) || value <= 1.0f || value >= 200.0f) {
+                        continue;
+                    }
+
+                    /* Keep edges from spreading heat into narrow cool gaps. */
+                    float weight = kernel[dy + 1][dx + 1];
+                    if (fabsf(value - center) > 2.0f) {
+                        weight *= 0.15f;
+                    }
+                    sum += value * weight;
+                    weight_sum += weight;
+                }
+            }
+
+            dst[r * w + c] = (weight_sum > 0.0f) ? (sum / weight_sum) : center;
+        }
+    }
+}
+
+static void apply_spatial_filter(const float *filtered, const float *median,
+                                 float *dst, int mode)
+{
+    switch (mode) {
+    case IR_FILTER_OFF:
+        memcpy(dst, filtered, MLX_RAW_PIXELS * sizeof(float));
+        break;
+    case IR_FILTER_MEDIAN:
+        memcpy(dst, median, MLX_RAW_PIXELS * sizeof(float));
+        break;
+    case IR_FILTER_GAUSSIAN:
+        spatial_gaussian_denoise(median, dst, MLX_RAW_W, MLX_RAW_H);
+        break;
+    case IR_FILTER_BILATERAL:
+        spatial_bilateral_denoise(filtered, dst, MLX_RAW_W, MLX_RAW_H);
+        break;
+    case IR_FILTER_BSPLINE:
+    default:
+        spatial_bilateral_denoise(median, dst, MLX_RAW_W, MLX_RAW_H);
+        break;
+    }
+}
+
 esp_err_t ir_camera_app_init(void)
 {
     size_t buf_size = MLX_INTERP_PIXELS * sizeof(uint16_t);
@@ -434,14 +554,7 @@ esp_err_t ir_camera_app_init(void)
         memset(s_display_buf[1], 0, buf_size);
     }
 
-#if IR_ROTATE_90
-    s_scale_x_fp = ((MLX_RAW_H - 1) << 16) / (MLX_INTERP_W - 1);
-    s_scale_y_fp = ((MLX_RAW_W - 1) << 16) / (MLX_INTERP_H - 1);
-#else
-    s_scale_x_fp = ((MLX_RAW_W - 1) << 16) / (MLX_INTERP_W - 1);
-    s_scale_y_fp = ((MLX_RAW_H - 1) << 16) / (MLX_INTERP_H - 1);
-#endif
-
+    ir_camera_update_transform();
     s_thermal_img_dsc.data = (const uint8_t *)s_display_buf[0];
     return ESP_OK;
 }
@@ -465,6 +578,13 @@ static void init_thermal_color_lut(ir_color_mode_t mode)
 {
     s_cur_color_mode = mode;
     ir_color_generate_lut(mode, s_color_lut);
+    if (g_ir_settings.color_reverse) {
+        for (int i = 0; i < 128; i++) {
+            uint16_t tmp = s_color_lut[i];
+            s_color_lut[i] = s_color_lut[255 - i];
+            s_color_lut[255 - i] = tmp;
+        }
+    }
 }
 
 /**
@@ -475,13 +595,109 @@ static void init_thermal_color_lut(ir_color_mode_t mode)
 void ir_camera_set_color_mode(ir_color_mode_t mode)
 {
     if (mode >= IR_COLOR_MODE_MAX) return;
-    s_cur_color_mode = mode;
-    ir_color_generate_lut(mode, s_color_lut);
+    g_ir_settings.color_mode = mode;
+    init_thermal_color_lut(mode);
 }
 
 ir_color_mode_t ir_camera_get_color_mode(void)
 {
     return s_cur_color_mode;
+}
+
+static void settings_clamp_to_valid_ranges(void)
+{
+    if (g_ir_settings.color_mode >= IR_COLOR_MODE_MAX) {
+        g_ir_settings.color_mode = IR_COLOR_IRONBOW;
+    }
+    if (g_ir_settings.rotate >= IR_ROT_MAX) {
+        g_ir_settings.rotate = IR_ROT_0;
+    }
+    if (g_ir_settings.temp_scale >= IR_SCALE_MAX) {
+        g_ir_settings.temp_scale = IR_SCALE_CELSIUS;
+    }
+    if (g_ir_settings.filter_mode >= IR_FILTER_MAX) {
+        g_ir_settings.filter_mode = IR_FILTER_BSPLINE;
+    }
+
+    g_ir_settings.fixture_px_x = (g_ir_settings.fixture_px_x < 0)
+                               ? 0 : g_ir_settings.fixture_px_x;
+    g_ir_settings.fixture_px_y = (g_ir_settings.fixture_px_y < 0)
+                               ? 0 : g_ir_settings.fixture_px_y;
+    if (g_ir_settings.fixture_px_x >= MLX_INTERP_W) {
+        g_ir_settings.fixture_px_x = MLX_INTERP_W - 1;
+    }
+    if (g_ir_settings.fixture_px_y >= MLX_INTERP_H) {
+        g_ir_settings.fixture_px_y = MLX_INTERP_H - 1;
+    }
+
+    if (g_ir_settings.brightness < 5) g_ir_settings.brightness = 5;
+    if (g_ir_settings.brightness > 100) g_ir_settings.brightness = 100;
+    if (g_ir_settings.auto_sleep_min < 0) g_ir_settings.auto_sleep_min = 0;
+    if (g_ir_settings.auto_sleep_min > 9999) g_ir_settings.auto_sleep_min = 9999;
+
+    g_ir_settings.emissivity = clampf_local(g_ir_settings.emissivity, 0.10f, 1.00f);
+    g_ir_settings.gamma = clampf_local(g_ir_settings.gamma, 0.50f, 3.00f);
+    g_ir_settings.temperature_offset_c =
+        clampf_local(g_ir_settings.temperature_offset_c, -10.0f, 10.0f);
+}
+
+esp_err_t ir_camera_settings_load(void)
+{
+    g_ir_settings = s_default_settings;
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(IR_SETTINGS_NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (err == ESP_OK) {
+        ir_settings_nvs_blob_t blob;
+        size_t size = sizeof(blob);
+        err = nvs_get_blob(handle, IR_SETTINGS_NVS_KEY, &blob, &size);
+        nvs_close(handle);
+
+        if (err == ESP_OK && size == sizeof(blob) &&
+            blob.magic == IR_SETTINGS_MAGIC && blob.version == IR_SETTINGS_VERSION) {
+            g_ir_settings = blob.settings;
+        } else if (err == ESP_ERR_NVS_NOT_FOUND) {
+            err = ESP_OK;
+        } else if (err == ESP_OK) {
+            err = ESP_ERR_INVALID_VERSION;
+        }
+    } else if (err == ESP_ERR_NVS_NOT_FOUND) {
+        err = ESP_OK;
+    }
+
+    settings_clamp_to_valid_ranges();
+    ir_camera_update_transform();
+    ir_camera_set_color_mode(g_ir_settings.color_mode);
+    return err;
+}
+
+esp_err_t ir_camera_settings_save(void)
+{
+    settings_clamp_to_valid_ranges();
+
+    ir_settings_nvs_blob_t blob = {
+        .magic = IR_SETTINGS_MAGIC,
+        .version = IR_SETTINGS_VERSION,
+        .settings = g_ir_settings,
+    };
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(IR_SETTINGS_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) return err;
+
+    err = nvs_set_blob(handle, IR_SETTINGS_NVS_KEY, &blob, sizeof(blob));
+    if (err == ESP_OK) err = nvs_commit(handle);
+    nvs_close(handle);
+    return err;
+}
+
+void ir_camera_settings_reset(void)
+{
+    g_ir_settings = s_default_settings;
+    ir_camera_settings_save();
+    ir_camera_update_transform();
+    ir_camera_set_color_mode(g_ir_settings.color_mode);
+    ir_camera_chart_clear();
 }
 
 /* 获取当前正在显示的热成像帧（280x240 RGB565），未就绪时返回 NULL */
@@ -503,87 +719,141 @@ void ir_camera_get_snapshot_range(float *min_t, float *max_t)
     if (max_t) *max_t = s_snapshot_max_t;
 }
 
+void ir_camera_update_transform(void)
+{
+    if (g_ir_settings.rotate == IR_ROT_90 || g_ir_settings.rotate == IR_ROT_270) {
+        s_source_col_step_fp =
+            ((uint32_t)(MLX_RAW_W - 1) << 16) / (uint32_t)(MLX_INTERP_H - 1);
+        s_source_row_step_fp =
+            ((uint32_t)(MLX_RAW_H - 1) << 16) / (uint32_t)(MLX_INTERP_W - 1);
+    } else {
+        s_source_col_step_fp =
+            ((uint32_t)(MLX_RAW_W - 1) << 16) / (uint32_t)(MLX_INTERP_W - 1);
+        s_source_row_step_fp =
+            ((uint32_t)(MLX_RAW_H - 1) << 16) / (uint32_t)(MLX_INTERP_H - 1);
+    }
+    s_transform_valid = true;
+}
+
+static inline void screen_xy_to_source_fp(int x, int y, int src_w, int src_h,
+                                          int dst_w, int dst_h,
+                                          uint32_t *col_fp, uint32_t *row_fp)
+{
+    int mx = g_ir_settings.mirror_horizontal ? (dst_w - 1 - x) : x;
+    int my = g_ir_settings.mirror_vertical ? (dst_h - 1 - y) : y;
+
+    switch (g_ir_settings.rotate) {
+    case IR_ROT_90:
+        *col_fp = (uint32_t)my * s_source_col_step_fp;
+        *row_fp = (uint32_t)(dst_w - 1 - mx) * s_source_row_step_fp;
+        break;
+    case IR_ROT_180:
+        *col_fp = (uint32_t)(dst_w - 1 - mx) * s_source_col_step_fp;
+        *row_fp = (uint32_t)(dst_h - 1 - my) * s_source_row_step_fp;
+        break;
+    case IR_ROT_270:
+        *col_fp = (uint32_t)(dst_h - 1 - my) * s_source_col_step_fp;
+        *row_fp = (uint32_t)mx * s_source_row_step_fp;
+        break;
+    case IR_ROT_0:
+    default:
+        *col_fp = (uint32_t)mx * s_source_col_step_fp;
+        *row_fp = (uint32_t)my * s_source_row_step_fp;
+        break;
+    }
+
+    if (*col_fp >= (uint32_t)(src_w - 1) << 16) {
+        *col_fp = (uint32_t)(src_w - 1) << 16;
+    }
+    if (*row_fp >= (uint32_t)(src_h - 1) << 16) {
+        *row_fp = (uint32_t)(src_h - 1) << 16;
+    }
+}
+
 static inline void raw_rc_to_screen_xy(int raw_r, int raw_c, int *px_x, int *px_y)
 {
-#if IR_ROTATE_90
-    int x = (raw_r * (MLX_INTERP_W - 1)) / (MLX_RAW_H - 1);
-    int y = (raw_c * (MLX_INTERP_H - 1)) / (MLX_RAW_W - 1);
-#else
-    int x = (raw_c * (MLX_INTERP_W - 1)) / (MLX_RAW_W - 1);
-    int y = (raw_r * (MLX_INTERP_H - 1)) / (MLX_RAW_H - 1);
-#endif
+    int x;
+    int y;
 
-    if (IR_MIRROR_X) x = (MLX_INTERP_W - 1) - x;
-    if (IR_MIRROR_Y) y = (MLX_INTERP_H - 1) - y;
+    switch (g_ir_settings.rotate) {
+    case IR_ROT_90:
+        x = (MLX_INTERP_W - 1) -
+            (raw_r * (MLX_INTERP_W - 1)) / (MLX_RAW_H - 1);
+        y = (raw_c * (MLX_INTERP_H - 1)) / (MLX_RAW_W - 1);
+        break;
+    case IR_ROT_180:
+        x = (MLX_INTERP_W - 1) -
+            (raw_c * (MLX_INTERP_W - 1)) / (MLX_RAW_W - 1);
+        y = (MLX_INTERP_H - 1) -
+            (raw_r * (MLX_INTERP_H - 1)) / (MLX_RAW_H - 1);
+        break;
+    case IR_ROT_270:
+        x = (raw_r * (MLX_INTERP_W - 1)) / (MLX_RAW_H - 1);
+        y = (MLX_INTERP_H - 1) -
+            (raw_c * (MLX_INTERP_H - 1)) / (MLX_RAW_W - 1);
+        break;
+    case IR_ROT_0:
+    default:
+        x = (raw_c * (MLX_INTERP_W - 1)) / (MLX_RAW_W - 1);
+        y = (raw_r * (MLX_INTERP_H - 1)) / (MLX_RAW_H - 1);
+        break;
+    }
 
-    if (x < 0) x = 0;
-    if (x >= MLX_INTERP_W) x = MLX_INTERP_W - 1;
-    if (y < 0) y = 0;
-    if (y >= MLX_INTERP_H) y = MLX_INTERP_H - 1;
+    if (g_ir_settings.mirror_horizontal) x = (MLX_INTERP_W - 1) - x;
+    if (g_ir_settings.mirror_vertical) y = (MLX_INTERP_H - 1) - y;
 
-    *px_x = x;
-    *px_y = y;
+    *px_x = clamp_int_local(x, 0, MLX_INTERP_W - 1);
+    *px_y = clamp_int_local(y, 0, MLX_INTERP_H - 1);
+}
+
+static inline int screen_xy_to_raw_idx(int px_x, int px_y)
+{
+    uint32_t col_fp;
+    uint32_t row_fp;
+
+    px_x = clamp_int_local(px_x, 0, MLX_INTERP_W - 1);
+    px_y = clamp_int_local(px_y, 0, MLX_INTERP_H - 1);
+    screen_xy_to_source_fp(px_x, px_y, MLX_RAW_W, MLX_RAW_H,
+                           MLX_INTERP_W, MLX_INTERP_H, &col_fp, &row_fp);
+
+    int raw_c = (int)(col_fp >> 16);
+    int raw_r = (int)(row_fp >> 16);
+    raw_c = clamp_int_local(raw_c, 0, MLX_RAW_W - 1);
+    raw_r = clamp_int_local(raw_r, 0, MLX_RAW_H - 1);
+    return raw_r * MLX_RAW_W + raw_c;
 }
 
 static void bilinear_scale_fullscreen_1to1(const uint8_t *src, int src_w, int src_h,
                                            uint16_t *dst, int dst_w, int dst_h,
                                            const uint16_t *lut)
 {
+    if (!s_transform_valid) ir_camera_update_transform();
+
     for (int y = 0; y < dst_h; y++) {
-        int eff_y = IR_MIRROR_Y ? (dst_h - 1 - y) : y;
         uint16_t *dst_row = &dst[y * dst_w];
-
-#if IR_ROTATE_90
-        uint32_t c_fp = eff_y * s_scale_y_fp;
-        int c0 = c_fp >> 16;
-        int c1 = (c0 < src_w - 1) ? (c0 + 1) : c0;
-        uint32_t c_diff = c_fp & 0xFFFF;
-        uint32_t c_diff_inv = 65536U - c_diff;
-
         for (int x = 0; x < dst_w; x++) {
-            int eff_x = IR_MIRROR_X ? (dst_w - 1 - x) : x;
-            uint32_t r_fp = eff_x * s_scale_x_fp;
-            int r0 = r_fp >> 16;
-            int r1 = (r0 < src_h - 1) ? (r0 + 1) : r0;
-            uint32_t r_diff = r_fp & 0xFFFF;
-            uint32_t r_diff_inv = 65536U - r_diff;
+            uint32_t col_fp;
+            uint32_t row_fp;
+            screen_xy_to_source_fp(x, y, src_w, src_h, dst_w, dst_h,
+                                   &col_fp, &row_fp);
 
-            const uint8_t *p_r0 = &src[r0 * src_w];
-            const uint8_t *p_r1 = &src[r1 * src_w];
-
-            uint32_t row0 = (p_r0[c0] * c_diff_inv + p_r0[c1] * c_diff) >> 16;
-            uint32_t row1 = (p_r1[c0] * c_diff_inv + p_r1[c1] * c_diff) >> 16;
-            uint32_t val  = (row0 * r_diff_inv + row1 * r_diff) >> 16;
-            if (val > 255U) val = 255U;
-
-            dst_row[x] = lut[val];
-        }
-#else
-        uint32_t r_fp = eff_y * s_scale_y_fp;
-        int r0 = r_fp >> 16;
-        int r1 = (r0 < src_h - 1) ? (r0 + 1) : r0;
-        uint32_t r_diff = r_fp & 0xFFFF;
-        uint32_t r_diff_inv = 65536U - r_diff;
-
-        const uint8_t *p_r0 = &src[r0 * src_w];
-        const uint8_t *p_r1 = &src[r1 * src_w];
-
-        for (int x = 0; x < dst_w; x++) {
-            int eff_x = IR_MIRROR_X ? (dst_w - 1 - x) : x;
-            uint32_t c_fp = eff_x * s_scale_x_fp;
-            int c0 = c_fp >> 16;
+            int c0 = col_fp >> 16;
+            int r0 = row_fp >> 16;
             int c1 = (c0 < src_w - 1) ? (c0 + 1) : c0;
-            uint32_t c_diff = c_fp & 0xFFFF;
-            uint32_t c_diff_inv = 65536U - c_diff;
+            int r1 = (r0 < src_h - 1) ? (r0 + 1) : r0;
+            uint32_t c_diff = col_fp & 0xFFFFU;
+            uint32_t r_diff = row_fp & 0xFFFFU;
+            uint32_t c_inv = 65536U - c_diff;
+            uint32_t r_inv = 65536U - r_diff;
 
-            uint32_t top = (p_r0[c0] * c_diff_inv + p_r0[c1] * c_diff) >> 16;
-            uint32_t bot = (p_r1[c0] * c_diff_inv + p_r1[c1] * c_diff) >> 16;
-            uint32_t val = (top * r_diff_inv + bot * r_diff) >> 16;
+            uint32_t top = ((uint32_t)src[r0 * src_w + c0] * c_inv +
+                            (uint32_t)src[r0 * src_w + c1] * c_diff) >> 16;
+            uint32_t bottom = ((uint32_t)src[r1 * src_w + c0] * c_inv +
+                               (uint32_t)src[r1 * src_w + c1] * c_diff) >> 16;
+            uint32_t val = (top * r_inv + bottom * r_diff) >> 16;
             if (val > 255U) val = 255U;
-
             dst_row[x] = lut[val];
         }
-#endif
     }
 }
 
@@ -593,8 +863,69 @@ void ir_camera_render_norm(const uint8_t *norm, ir_color_mode_t mode, uint16_t *
     if (!norm || !dst) return;
     uint16_t lut[256];
     ir_color_generate_lut(mode, lut);
+    if (g_ir_settings.color_reverse) {
+        for (int i = 0; i < 128; i++) {
+            uint16_t tmp = lut[i];
+            lut[i] = lut[255 - i];
+            lut[255 - i] = tmp;
+        }
+    }
     bilinear_scale_fullscreen_1to1(norm, MLX_RAW_W, MLX_RAW_H,
                                    dst, MLX_INTERP_W, MLX_INTERP_H, lut);
+}
+
+float ir_camera_convert_temp(float temp_c, const char **unit_str)
+{
+    switch (g_ir_settings.temp_scale) {
+    case IR_SCALE_FAHRENHEIT:
+        if (unit_str) *unit_str = "F";
+        return temp_c * 1.8f + 32.0f;
+    case IR_SCALE_KELVIN:
+        if (unit_str) *unit_str = "K";
+        return temp_c + 273.15f;
+    case IR_SCALE_RANKINE:
+        if (unit_str) *unit_str = "R";
+        return (temp_c + 273.15f) * 1.8f;
+    case IR_SCALE_CELSIUS:
+    default:
+        if (unit_str) *unit_str = "C";
+        return temp_c;
+    }
+}
+
+void ir_camera_chart_clear(void)
+{
+    portENTER_CRITICAL(&s_chart_mux);
+    s_chart_head = 0;
+    s_chart_count = 0;
+    portEXIT_CRITICAL(&s_chart_mux);
+}
+
+static void ir_camera_chart_push(float temp_c)
+{
+    if (!isfinite(temp_c) || temp_c <= 1.0f || temp_c >= 200.0f) return;
+
+    portENTER_CRITICAL(&s_chart_mux);
+    s_chart_buf[s_chart_head] = temp_c;
+    s_chart_head = (s_chart_head + 1) % IR_CHART_HISTORY_LEN;
+    if (s_chart_count < IR_CHART_HISTORY_LEN) {
+        s_chart_count++;
+    }
+    portEXIT_CRITICAL(&s_chart_mux);
+}
+
+void ir_camera_chart_get_data(float *out_buf, int *out_count)
+{
+    portENTER_CRITICAL(&s_chart_mux);
+    int count = s_chart_count;
+    int first = (s_chart_head + IR_CHART_HISTORY_LEN - count) % IR_CHART_HISTORY_LEN;
+    if (out_count) *out_count = count;
+    if (out_buf) {
+        for (int i = 0; i < count; i++) {
+            out_buf[i] = s_chart_buf[(first + i) % IR_CHART_HISTORY_LEN];
+        }
+    }
+    portEXIT_CRITICAL(&s_chart_mux);
 }
 
 static inline void draw_diamond_marker(uint16_t *buf, int cx, int cy,
@@ -638,10 +969,8 @@ static void temperature_to_norm_u8(const float *src, uint8_t *dst,
         float norm = (src[i] - map_min) * range_inv;
         norm = clampf_local(norm, 0.0f, 1.0f);
 
-        // 温和对比度曲线 (0.65 * norm^1.5 + 0.35 * norm)：
-        // 既压低背景暗部噪点，又保留手掌高温区的细节层次，防止手心一片惨白过曝
-        float gamma_15 = norm * sqrtf(norm);
-        norm = 0.65f * gamma_15 + 0.35f * norm;
+        /* Gamma 由设置页运行期调整；默认 1.5 与原显示曲线保持一致。 */
+        norm = powf(norm, clampf_local(g_ir_settings.gamma, 0.5f, 3.0f));
 
         dst[i] = (uint8_t)(norm * 255.0f + 0.5f);
     }
@@ -656,7 +985,7 @@ void ir_camera_task_main(void *pvParameters)
              THERMAL_FIXED_MIN_C, THERMAL_FIXED_MAX_C, THERMAL_USE_AUTO_RANGE);
 
     // init_ironbow_lut();
-    init_thermal_color_lut(THERMAL_COLOR_MODE);
+    init_thermal_color_lut(g_ir_settings.color_mode);
 
     MLX90640_I2CInit();
     MLX90640_SetRefreshRate(MLX90640_ADDR, RefreshRate);
@@ -694,10 +1023,12 @@ void ir_camera_task_main(void *pvParameters)
     char text_fps[32];
     char text_max_tag[16];
     char text_min_tag[16];
+    char text_fix_tag[16];
 
     uint32_t frame_count = 0;
     float real_fps = 0.0f;
     int64_t last_time_us = esp_timer_get_time();
+    int64_t last_chart_us = 0;
 
     float smooth_min_t = THERMAL_FIXED_MIN_C;
     float smooth_max_t = THERMAL_FIXED_MAX_C;
@@ -727,7 +1058,8 @@ void ir_camera_task_main(void *pvParameters)
 
             // 1. 官方原生计算：增量更新当前 subpage 的 384 个点
             MLX90640_CalculateTo(ir_frame_data, mlx_params,
-                                 emissivity, smooth_ta - TA_SHIFT, raw_temp_matrix);
+                                 g_ir_settings.emissivity,
+                                 smooth_ta - TA_SHIFT, raw_temp_matrix);
 
             int mode = (ir_frame_data[832] & MLX90640_CTRL_MEAS_MODE_MASK) >> 5;
             MLX90640_BadPixelsCorrection(mlx_params->brokenPixels, raw_temp_matrix, mode, mlx_params);
@@ -751,9 +1083,19 @@ void ir_camera_task_main(void *pvParameters)
             spatial_median_outlier_filter(filtered_temp, median_temp,
                                           MLX_RAW_W, MLX_RAW_H);
 
-            // 4. 双边保边平滑：压制背景颗粒，阻断高温手指向低温指缝漏热
-            spatial_bilateral_denoise(median_temp, spatial_temp,
-                                      MLX_RAW_W, MLX_RAW_H);
+            // 4. 按设置页选择的滤波算法生成最终的测温/显示矩阵
+            apply_spatial_filter(filtered_temp, median_temp, spatial_temp,
+                                 (int)g_ir_settings.filter_mode);
+
+            /* 出厂校准偏移叠加到最终输出，不破坏原始滤波状态。 */
+            float calibration_offset = g_ir_settings.temperature_offset_c;
+            if (fabsf(calibration_offset) > 0.001f) {
+                for (int i = 0; i < MLX_RAW_PIXELS; i++) {
+                    if (isfinite(spatial_temp[i])) {
+                        spatial_temp[i] += calibration_offset;
+                    }
+                }
+            }
 
             // 5. 统计极值
             float cur_min = 200.0f;
@@ -822,13 +1164,37 @@ void ir_camera_task_main(void *pvParameters)
                 last_time_us = now_us;
             }
 
-            float center_t = spatial_temp[12 * MLX_RAW_W + 16];
+            int center_idx = screen_xy_to_raw_idx(MLX_INTERP_W / 2,
+                                                  MLX_INTERP_H / 2);
+            int fixture_idx = screen_xy_to_raw_idx(g_ir_settings.fixture_px_x,
+                                                   g_ir_settings.fixture_px_y);
+            float center_t = spatial_temp[center_idx];
+            float fixture_t = spatial_temp[fixture_idx];
+            float record_t = g_ir_settings.label_fixture ? fixture_t : center_t;
+
+            int64_t chart_now_us = esp_timer_get_time();
+            if (last_chart_us == 0 ||
+                chart_now_us - last_chart_us >= 500000) {
+                ir_camera_chart_push(record_t);
+                last_chart_us = chart_now_us;
+            }
+
+            const char *unit = "C";
+            float disp_max = ir_camera_convert_temp(cur_max, &unit);
+            float disp_min = ir_camera_convert_temp(cur_min, NULL);
+            float disp_record = ir_camera_convert_temp(record_t, NULL);
+            float disp_dt = disp_max - disp_min;
+
             snprintf(text_fps, sizeof(text_fps), "%.1f FPS", real_fps);
             snprintf(text_info, sizeof(text_info),
-                     "MAX: %.1f C    MIN: %.1f C\nCEN: %.1f C    DT: %.1f C",
-                     cur_max, cur_min, center_t, (cur_max - cur_min));
-            snprintf(text_max_tag, sizeof(text_max_tag), "MAX %.1f", cur_max);
-            snprintf(text_min_tag, sizeof(text_min_tag), "MIN %.1f", cur_min);
+                     "MAX %.1f %s   MIN %.1f %s\n%s %.1f %s   DT %.1f %s",
+                     disp_max, unit, disp_min, unit,
+                     g_ir_settings.label_fixture ? "FIX" : "CEN",
+                     disp_record, unit, disp_dt, unit);
+            snprintf(text_max_tag, sizeof(text_max_tag), "MAX %.1f %s", disp_max, unit);
+            snprintf(text_min_tag, sizeof(text_min_tag), "MIN %.1f %s", disp_min, unit);
+            snprintf(text_fix_tag, sizeof(text_fix_tag), "FIX %.1f %s",
+                     ir_camera_convert_temp(fixture_t, NULL), unit);
 
             // 7. 映射并进行双线性插值送显
             if (valid_pts > 400) {
@@ -852,9 +1218,22 @@ void ir_camera_task_main(void *pvParameters)
                 raw_rc_to_screen_xy(max_idx / MLX_RAW_W, max_idx % MLX_RAW_W, &max_px_x, &max_px_y);
                 raw_rc_to_screen_xy(min_idx / MLX_RAW_W, min_idx % MLX_RAW_W, &min_px_x, &min_px_y);
 
-                draw_diamond_marker(cur_write_buf, max_px_x, max_px_y, MLX_INTERP_W, MLX_INTERP_H, 5, 0xF800);
-                draw_diamond_marker(cur_write_buf, min_px_x, min_px_y, MLX_INTERP_W, MLX_INTERP_H, 5, 0x07FF);
-                draw_diamond_marker(cur_write_buf, MLX_INTERP_W / 2, MLX_INTERP_H / 2, MLX_INTERP_W, MLX_INTERP_H, 3, 0xFFFF);
+                if (g_ir_settings.label_hottest) {
+                    draw_diamond_marker(cur_write_buf, max_px_x, max_px_y,
+                                        MLX_INTERP_W, MLX_INTERP_H, 5, 0xF800);
+                }
+                if (g_ir_settings.label_coldest) {
+                    draw_diamond_marker(cur_write_buf, min_px_x, min_px_y,
+                                        MLX_INTERP_W, MLX_INTERP_H, 5, 0x07FF);
+                }
+                draw_diamond_marker(cur_write_buf,
+                                    g_ir_settings.label_fixture
+                                        ? g_ir_settings.fixture_px_x : MLX_INTERP_W / 2,
+                                    g_ir_settings.label_fixture
+                                        ? g_ir_settings.fixture_px_y : MLX_INTERP_H / 2,
+                                    MLX_INTERP_W, MLX_INTERP_H,
+                                    g_ir_settings.label_fixture ? 5 : 3,
+                                    g_ir_settings.label_fixture ? 0x07E0 : 0xFFFF);
 
                 // 8. 刷新到 LVGL 显存
                 if (example_lvgl_lock(100)) {
@@ -865,10 +1244,39 @@ void ir_camera_task_main(void *pvParameters)
                     }
                     if (label_fps_float) lv_label_set_text(label_fps_float, text_fps);
                     if (label_info) lv_label_set_text(label_info, text_info);
+                    if (tag_emissivity) {
+                        lv_label_set_text_fmt(tag_emissivity, "e:%.2f",
+                                              g_ir_settings.emissivity);
+                    }
 
                     /* 温度气泡夹在屏幕内，防止超出 280x240 */
-                    place_temp_tag(tag_max, max_px_x, max_px_y, text_max_tag);
-                    place_temp_tag(tag_min, min_px_x, min_px_y, text_min_tag);
+                    if (tag_max) {
+                        if (g_ir_settings.label_hottest) {
+                            lv_obj_clear_flag(tag_max, LV_OBJ_FLAG_HIDDEN);
+                            place_temp_tag(tag_max, max_px_x, max_px_y, text_max_tag);
+                        } else {
+                            lv_obj_add_flag(tag_max, LV_OBJ_FLAG_HIDDEN);
+                        }
+                    }
+                    if (tag_min) {
+                        if (g_ir_settings.label_coldest) {
+                            lv_obj_clear_flag(tag_min, LV_OBJ_FLAG_HIDDEN);
+                            place_temp_tag(tag_min, min_px_x, min_px_y, text_min_tag);
+                        } else {
+                            lv_obj_add_flag(tag_min, LV_OBJ_FLAG_HIDDEN);
+                        }
+                    }
+                    if (tag_fix) {
+                        if (g_ir_settings.label_fixture) {
+                            lv_obj_clear_flag(tag_fix, LV_OBJ_FLAG_HIDDEN);
+                            place_temp_tag(tag_fix,
+                                           g_ir_settings.fixture_px_x,
+                                           g_ir_settings.fixture_px_y,
+                                           text_fix_tag);
+                        } else {
+                            lv_obj_add_flag(tag_fix, LV_OBJ_FLAG_HIDDEN);
+                        }
+                    }
 
                     if (s_display_buf[0] != s_display_buf[1]) {
                         s_back_idx = 1U - s_back_idx;

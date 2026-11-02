@@ -2,11 +2,13 @@
 #include <stdio.h>
 #include "lvgl.h"
 #include "esp_heap_caps.h"
+#include "esp_log.h"
 #include "ir_mlx90640_app.h"
 #include "ir_color_modes.h"
 #include "dev_sys.h"
 #include "lang.h"
 #include "photo.h"
+#include "ir_settings_ui.h"
 
 /* ================= 横屏逻辑分辨率（与 app_main.c 中 UI_SCREEN_W/H 一致） ================= */
 #define UI_SCREEN_W        280
@@ -34,6 +36,8 @@
 #define T_DANGER_BG       0xFFEBEE   // 危险浅红底
 #define T_DANGER_BORDER   0xFFCDD2   // 危险浅红边
 
+static const char *UI_TAG = "thermal_ui";
+
 static inline lv_coord_t ui_clamp(lv_coord_t v, lv_coord_t lo, lv_coord_t hi)
 {
     if (v < lo) return lo;
@@ -47,6 +51,8 @@ lv_obj_t *label_fps_float = NULL;
 lv_obj_t *label_info = NULL;
 lv_obj_t *tag_max = NULL;
 lv_obj_t *tag_min = NULL;
+lv_obj_t *tag_fix = NULL;
+lv_obj_t *tag_emissivity = NULL;
 
 static lv_obj_t *touch_cursor = NULL;
 static lv_obj_t *touch_label  = NULL;
@@ -98,17 +104,25 @@ static bool menu_click_guard(void);
 
 /* 左右滑动状态：按下记录起点，移动过程中达到阈值立即切换（不依赖松手事件） */
 static lv_point_t s_swipe_start = {0, 0};
+static bool s_gallery_from_settings = false;
 static bool s_swipe_tracking = false;
 static bool s_swipe_fired    = false;
 static bool s_swipe_moved    = false;
+static bool s_press_hold_candidate = false;
+static bool s_long_press_fired = false;
+static uint32_t s_press_start_ms = 0;
 
 /* 双击拍照计数 + 长按打开菜单时刻（用于防误触） */
 static uint32_t s_tap_count = 0;
 static uint32_t s_tap_last_ms = 0;
 static uint32_t s_menu_open_ms = 0;
+static lv_timer_t *s_fixture_save_timer = NULL;
 
-#define COLOR_SWIPE_MIN_DX       40   // 水平移动超过 40px 切换模式
+#define COLOR_SWIPE_MIN_DX       24   // 水平移动超过 24px 立即切换配色
 #define COLOR_SWIPE_MOVE_PX       5   // 超过 5px 视为“在滑动”，不再触发长按菜单
+#define TAP_MOVE_PX              12   // 双击拍照允许的轻微抖动
+#define MENU_HOLD_TOLERANCE_PX   24   // 长按期间允许的触摸抖动
+#define MENU_HOLD_TIME_MS       500U  // 长按 0.5 秒呼出设置菜单
 #define MENU_SWIPE_EXIT_DX       60   // 菜单打开后，左右滑动超过 60px 退出菜单
 
 static const uint32_t s_mode_dot_hex[IR_COLOR_MODE_MAX] = {
@@ -302,6 +316,10 @@ static void menu_backdrop_cancel_cb(lv_event_t *e)
     }
     if (s_menu_backdrop) {
         lv_obj_add_flag(s_menu_backdrop, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (s_gallery_from_settings) {
+        s_gallery_from_settings = false;
+        ir_settings_ui_open();
     }
 }
 
@@ -608,6 +626,14 @@ static void rebuild_gallery_list(void)
 static void menu_back_to_main_cb(lv_event_t *e)
 {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    if (s_gallery_from_settings) {
+        s_gallery_from_settings = false;
+        if (s_menu_backdrop) {
+            lv_obj_add_flag(s_menu_backdrop, LV_OBJ_FLAG_HIDDEN);
+        }
+        ir_settings_ui_open();
+        return;
+    }
     menu_show_main();
 }
 
@@ -822,11 +848,28 @@ static void cycle_color_mode(int direction)
     }
 }
 
+static void fixture_save_timer_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    ir_camera_settings_save();
+    s_fixture_save_timer = NULL;
+}
+
 static void screen_touch_event_cb(lv_event_t *e)
 {
     lv_event_code_t code = lv_event_get_code(e);
     lv_indev_t *indev = lv_indev_get_act();
     if (!indev) return;
+
+    if (code == LV_EVENT_PRESSED) {
+        ir_settings_ui_note_activity();
+    }
+
+    if (ir_settings_ui_is_open()) {
+        lv_obj_add_flag(touch_cursor, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(touch_label, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
 
     if (s_menu_backdrop && !lv_obj_has_flag(s_menu_backdrop, LV_OBJ_FLAG_HIDDEN)) {
         lv_obj_add_flag(touch_cursor, LV_OBJ_FLAG_HIDDEN);
@@ -848,6 +891,10 @@ static void screen_touch_event_cb(lv_event_t *e)
                     lv_label_set_text_fmt(label_title, "MODE: %s", ir_color_get_mode_name(s_backup_mode));
                 }
                 lv_obj_add_flag(s_menu_backdrop, LV_OBJ_FLAG_HIDDEN);
+                if (s_gallery_from_settings) {
+                    s_gallery_from_settings = false;
+                    ir_settings_ui_open();
+                }
             }
             s_swipe_tracking = false;
         }
@@ -860,9 +907,21 @@ static void screen_touch_event_cb(lv_event_t *e)
         lv_indev_get_point(indev, &p);
         int dx = p.x - s_swipe_start.x;
         int dy = p.y - s_swipe_start.y;
-        if (abs(dx) > COLOR_SWIPE_MOVE_PX || abs(dy) > COLOR_SWIPE_MOVE_PX) {
+        if (abs(dx) > TAP_MOVE_PX || abs(dy) > TAP_MOVE_PX) {
             return; /* 是滑动，不算点击 */
         }
+
+        if (g_ir_settings.label_fixture) {
+            g_ir_settings.fixture_px_x = (int)ui_clamp(p.x, 0, UI_SCREEN_W - 1);
+            g_ir_settings.fixture_px_y = (int)ui_clamp(p.y, 0, UI_SCREEN_H - 1);
+            if (s_fixture_save_timer) {
+                lv_timer_del(s_fixture_save_timer);
+            }
+            s_fixture_save_timer =
+                lv_timer_create(fixture_save_timer_cb, 1500, NULL);
+            lv_timer_set_repeat_count(s_fixture_save_timer, 1);
+        }
+
         uint32_t now = lv_tick_get();
         if (now - s_tap_last_ms < 700) {
             s_tap_count++;
@@ -883,25 +942,26 @@ static void screen_touch_event_cb(lv_event_t *e)
         s_swipe_tracking = true;
         s_swipe_fired = false;
         s_swipe_moved = false;
+        s_press_hold_candidate = true;
+        s_long_press_fired = false;
+        s_press_start_ms = lv_tick_get();
     }
 
-    // 长按屏幕：弹出“模式配置”一级菜单（如果手指已经移动过，说明是在滑动，不弹菜单）
+    /*
+     * CST816 触摸坐标会有几像素抖动，不能再用原来的 5px 移动阈值取消长按。
+     * 这里独立累计按住时间，允许 24px 内抖动，同时仍保留左右滑动切色。
+     */
     if (code == LV_EVENT_LONG_PRESSED) {
-        if (s_swipe_moved) return;
-
-        s_swipe_tracking = false;
-        lv_obj_add_flag(touch_cursor, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(touch_label, LV_OBJ_FLAG_HIDDEN);
-
-        if (s_menu_backdrop) {
-            s_backup_mode  = ir_camera_get_color_mode();
-            s_pending_mode = s_backup_mode;
-            update_menu_active_style(s_pending_mode);
-            menu_show_main();                      // 长按先打开一级“模式配置”菜单
-            s_menu_open_ms = lv_tick_get();        // 记录打开时刻，用于防误触
-            lv_obj_clear_flag(s_menu_backdrop, LV_OBJ_FLAG_HIDDEN);
+        if (!s_long_press_fired && !s_swipe_fired) {
+            s_long_press_fired = true;
+            s_press_hold_candidate = false;
+            s_swipe_tracking = false;
+            lv_obj_add_flag(touch_cursor, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(touch_label, LV_OBJ_FLAG_HIDDEN);
+            ESP_LOGI(UI_TAG, "settings menu requested by long press");
+            ir_settings_ui_open();
+            return;
         }
-        return;
     }
 
     if (code == LV_EVENT_PRESSED || code == LV_EVENT_PRESSING) {
@@ -913,6 +973,24 @@ static void screen_touch_event_cb(lv_event_t *e)
 
         if (abs(dx) > COLOR_SWIPE_MOVE_PX || abs(dy) > COLOR_SWIPE_MOVE_PX) {
             s_swipe_moved = true;
+        }
+
+        if (s_press_hold_candidate &&
+            (abs(dx) > MENU_HOLD_TOLERANCE_PX ||
+             abs(dy) > MENU_HOLD_TOLERANCE_PX)) {
+            s_press_hold_candidate = false;
+        }
+
+        if (s_press_hold_candidate && !s_long_press_fired &&
+            lv_tick_elaps(s_press_start_ms) >= MENU_HOLD_TIME_MS) {
+            s_long_press_fired = true;
+            s_press_hold_candidate = false;
+            s_swipe_tracking = false;
+            lv_obj_add_flag(touch_cursor, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(touch_label, LV_OBJ_FLAG_HIDDEN);
+            ESP_LOGI(UI_TAG, "settings menu requested by 1s hold timer");
+            ir_settings_ui_open();
+            return;
         }
 
         /* 达到阈值立即切换：不依赖松手坐标，快速/斜向滑动也能生效 */
@@ -934,11 +1012,29 @@ static void screen_touch_event_cb(lv_event_t *e)
         lv_obj_clear_flag(touch_label, LV_OBJ_FLAG_HIDDEN);
     }
     else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+        lv_point_t p;
+        lv_indev_get_point(indev, &p);
+        int dx = p.x - s_swipe_start.x;
+        int dy = p.y - s_swipe_start.y;
+        bool open_on_release =
+            !s_long_press_fired &&
+            s_press_hold_candidate &&
+            lv_tick_elaps(s_press_start_ms) >= MENU_HOLD_TIME_MS &&
+            abs(dx) <= MENU_HOLD_TOLERANCE_PX &&
+            abs(dy) <= MENU_HOLD_TOLERANCE_PX;
+
         s_swipe_tracking = false;
         s_swipe_fired = false;
         s_swipe_moved = false;
+        s_press_hold_candidate = false;
         lv_obj_add_flag(touch_cursor, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(touch_label, LV_OBJ_FLAG_HIDDEN);
+
+        if (open_on_release) {
+            s_long_press_fired = true;
+            ESP_LOGI(UI_TAG, "settings menu requested on release");
+            ir_settings_ui_open();
+        }
     }
 }
 
@@ -1023,13 +1119,13 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
     lv_label_set_text(label_fps_float, "-- FPS");
 
     // 4. 右上角发射率小药丸（白底中蓝字）
-    lv_obj_t *tag_emissivity = lv_label_create(ui_root);
+    tag_emissivity = lv_label_create(ui_root);
     ui_style_pill(tag_emissivity, T_BORDER_LIGHT, T_TEXT_MID, LV_OPA_60);
     lv_obj_set_style_text_font(tag_emissivity, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_set_style_pad_hor(tag_emissivity, 8, LV_PART_MAIN);
     lv_obj_set_style_pad_ver(tag_emissivity, 2, LV_PART_MAIN);
     lv_obj_align(tag_emissivity, LV_ALIGN_TOP_RIGHT, -6, 34);
-    lv_label_set_text(tag_emissivity, "e:0.95");
+    lv_label_set_text_fmt(tag_emissivity, "e:%.2f", g_ir_settings.emissivity);
 
     // 5. 动态最高温与最低温指示气泡（白底，MAX 红 / MIN 蓝）
     tag_max = lv_label_create(ui_root);
@@ -1045,6 +1141,14 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
     lv_obj_set_style_pad_hor(tag_min, 7, LV_PART_MAIN);
     lv_obj_set_style_pad_ver(tag_min, 2, LV_PART_MAIN);
     lv_label_set_text(tag_min, "");
+
+    tag_fix = lv_label_create(ui_root);
+    ui_style_pill(tag_fix, 0x00A958, 0x007A3F, LV_OPA_80);
+    lv_obj_set_style_text_font(tag_fix, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_pad_hor(tag_fix, 7, LV_PART_MAIN);
+    lv_obj_set_style_pad_ver(tag_fix, 2, LV_PART_MAIN);
+    lv_label_set_text(tag_fix, "");
+    lv_obj_add_flag(tag_fix, LV_OBJ_FLAG_HIDDEN);
 
     // 6. 底部仪表盘卡片（白底蓝字）
     lv_obj_t *bottom_capsule = lv_obj_create(ui_root);
@@ -1174,7 +1278,30 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
     }
 
     create_settings_menu(ui_root);
+    ir_settings_ui_create(ui_root);
 
     lv_obj_add_flag(scr, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(scr, screen_touch_event_cb, LV_EVENT_ALL, NULL);
+}
+
+void thermal_ui_show_gallery(void)
+{
+    if (!s_menu_backdrop) return;
+    s_gallery_from_settings = true;
+    s_backup_mode = ir_camera_get_color_mode();
+    s_pending_mode = s_backup_mode;
+    s_menu_open_ms = lv_tick_get();
+    menu_show_gallery();
+    lv_obj_clear_flag(s_menu_backdrop, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(s_menu_backdrop);
+}
+
+void thermal_ui_refresh_language(void)
+{
+    if (label_info) {
+        lv_obj_set_style_text_font(label_info, lang_font(), LV_PART_MAIN);
+    }
+    if (s_toast_lbl) {
+        lv_obj_set_style_text_font(s_toast_lbl, lang_font(), LV_PART_MAIN);
+    }
 }

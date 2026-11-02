@@ -22,6 +22,7 @@
 #include "lang.h"
 #include "boot_ui.h"
 #include "photo.h"
+#include "ir_settings_ui.h"
 #include "esp_lcd_touch_cst816s.h"
 #include "driver/i2c_master.h"
 #include "esp_lcd_panel_st7789.h"
@@ -398,7 +399,7 @@ void app_main(void)
     indev_drv.type = LV_INDEV_TYPE_POINTER;
     indev_drv.disp = disp;
     indev_drv.read_cb = example_lvgl_touch_cb;
-    indev_drv.long_press_time = 800;// 长按 800ms 触发菜单（防止左右滑动切色时误触弹窗）
+    indev_drv.long_press_time = 500;  // 长按 0.5 秒进入参数设置
     indev_drv.user_data = tp;
     lv_indev_drv_register(&indev_drv);
     // ----------------------------
@@ -440,7 +441,6 @@ void app_main(void)
     /* ============ 开机 Logo + 首次开机语言选择 ============ */
     lang_init();
     photo_init();
-    sys_start_auto_poweroff(20 * 60); /* 工作 20 分钟后自动关机 */
     boot_show_splash(disp);
     if (!lang_configured()) {
         boot_show_language_select(disp);
@@ -448,6 +448,7 @@ void app_main(void)
 
     ESP_LOGI(TAG, "Init thermal buffer");
     ESP_ERROR_CHECK(ir_camera_app_init()); // 务必在创建 UI 前分配显存！
+    ESP_ERROR_CHECK(ir_settings_ui_init());
 
     ESP_LOGI(TAG, "Display LVGL Meter Widget");
     // Lock the mutex due to the LVGL APIs are not thread-safe
