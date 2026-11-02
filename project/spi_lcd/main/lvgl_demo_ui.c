@@ -96,6 +96,7 @@ static lv_timer_t *s_toast_timer  = NULL;
 /* 前向声明（函数间相互调用） */
 static void create_settings_menu(lv_obj_t *parent);
 static void apply_language_change(void);
+extern void thermal_ui_refresh_language(void);
 static void rebuild_gallery_list(void);
 static void open_viewer(int idx);
 static void close_viewer(void);
@@ -217,9 +218,9 @@ static void update_menu_active_style(ir_color_mode_t active_mode)
             if (s_mode_lbls[i]) lv_obj_set_style_text_color(s_mode_lbls[i], lv_color_white(), LV_PART_MAIN);
             if (s_mode_chks[i]) lv_label_set_text(s_mode_chks[i], "ON");
         } else {
-            lv_obj_set_style_bg_color(s_mode_btns[i], lv_color_hex(T_ITEM_BG), LV_PART_MAIN);
+            lv_obj_set_style_bg_color(s_mode_btns[i], lv_color_white(), LV_PART_MAIN);
             lv_obj_set_style_bg_opa(s_mode_btns[i], LV_OPA_COVER, LV_PART_MAIN);
-            lv_obj_set_style_border_color(s_mode_btns[i], lv_color_hex(T_ITEM_BORDER), LV_PART_MAIN);
+            lv_obj_set_style_border_color(s_mode_btns[i], lv_color_hex(T_BORDER_LIGHT), LV_PART_MAIN);
             lv_obj_set_style_border_width(s_mode_btns[i], 1, LV_PART_MAIN);
             if (s_mode_lbls[i]) lv_obj_set_style_text_color(s_mode_lbls[i], lv_color_hex(T_TEXT_DARK), LV_PART_MAIN);
             if (s_mode_chks[i]) lv_label_set_text(s_mode_chks[i], "");
@@ -515,14 +516,7 @@ static void viewer_delete_cb(lv_event_t *e)
 static void apply_language_async_cb(void *user_data)
 {
     (void)user_data;
-    if (s_menu_backdrop) {
-        lv_obj_del(s_menu_backdrop);
-        s_menu_backdrop = NULL;
-    }
-    if (label_info) {
-        lv_obj_set_style_text_font(label_info, lang_font(), LV_PART_MAIN);
-    }
-    create_settings_menu(s_ui_root);
+    thermal_ui_refresh_language();
 }
 
 /* 语言切换后：用 LVGL 异步回调延迟重建，避免在点击回调里删除/重建对象导致卡死 */
@@ -616,11 +610,11 @@ static void rebuild_gallery_list(void)
         char buf[32];
         snprintf(buf, sizeof(buf), "%s %d", lang_str(STR_PHOTO), i + 1);
         create_list_entry(s_gallery_list, buf, false, true, gallery_entry_click_cb,
-                          (void *)(uintptr_t)i, NULL, 226, 34);
+                          (void *)(uintptr_t)i, NULL, 238, 34);
     }
 
     create_list_entry(s_gallery_list, lang_str(STR_DELETE_ALL), true, false,
-                      gallery_delete_all_cb, NULL, NULL, 226, 34);
+                      gallery_delete_all_cb, NULL, NULL, 238, 34);
 }
 
 /* 通用：返回一级菜单 */
@@ -693,10 +687,10 @@ static void create_settings_menu(lv_obj_t *parent)
     create_title(s_main_menu_panel, lang_str(STR_MODE_CONFIG));
     s_main_menu_list = create_list_container(s_main_menu_panel, 238, 190);
 
-    create_list_entry(s_main_menu_list, lang_str(STR_COLOR_MODE), false, true, main_menu_color_cb, NULL, NULL, 226, 38);
-    create_list_entry(s_main_menu_list, lang_str(STR_LANGUAGE),  false, true, main_menu_language_cb, NULL, NULL, 226, 38);
-    create_list_entry(s_main_menu_list, lang_str(STR_GALLERY),   false, true, main_menu_gallery_cb, NULL, NULL, 226, 38);
-    create_list_entry(s_main_menu_list, lang_str(STR_POWER_OFF), true,  false, power_button_cb, NULL, NULL, 226, 38);
+    create_list_entry(s_main_menu_list, lang_str(STR_COLOR_MODE), false, true, main_menu_color_cb, NULL, NULL, 238, 38);
+    create_list_entry(s_main_menu_list, lang_str(STR_LANGUAGE),  false, true, main_menu_language_cb, NULL, NULL, 238, 38);
+    create_list_entry(s_main_menu_list, lang_str(STR_GALLERY),   false, true, main_menu_gallery_cb, NULL, NULL, 238, 38);
+    create_list_entry(s_main_menu_list, lang_str(STR_POWER_OFF), true,  false, power_button_cb, NULL, NULL, 238, 38);
 
     /* ================= 二级菜单：色彩模式调色板 ================= */
     // 2. 居中主面板 (268x232)
@@ -715,26 +709,28 @@ static void create_settings_menu(lv_obj_t *parent)
     lv_label_set_text(s_menu_title, lang_str(STR_COLOR_MODE));
     lv_obj_align(s_menu_title, LV_ALIGN_TOP_MID, 0, 8);
 
-    // 4. 中间单列纵向可滑动列表容器 (宽 244px，高 148px，一次显示约 3.5 行)
+    // 4. 中间单列纵向可滑动列表容器 (宽 244px，高 148px，一次显示约 4 行)
     s_list_cont = lv_obj_create(s_palette_panel);
     lv_obj_remove_style_all(s_list_cont);
     lv_obj_set_size(s_list_cont, 244, 148);
     lv_obj_align(s_list_cont, LV_ALIGN_TOP_MID, 0, 30);
-    lv_obj_set_style_bg_color(s_list_cont, lv_color_hex(T_PAGE_BG), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_list_cont, lv_color_white(), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(s_list_cont, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_radius(s_list_cont, 10, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(s_list_cont, 6, LV_PART_MAIN);
-    lv_obj_set_style_pad_row(s_list_cont, 6, LV_PART_MAIN);
+    lv_obj_set_style_radius(s_list_cont, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(s_list_cont, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(s_list_cont, 0, LV_PART_MAIN);
     lv_obj_set_flex_flow(s_list_cont, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_scroll_dir(s_list_cont, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(s_list_cont, LV_SCROLLBAR_MODE_ACTIVE);
 
-    // 往滑动列表中添加 9 个全宽大尺寸选项条 (232x32)
+    // 往滑动列表中添加 9 个全宽选项条 (244x32)
     for (int i = 0; i < IR_COLOR_MODE_MAX; i++) {
         lv_obj_t *btn = lv_obj_create(s_list_cont);
         lv_obj_remove_style_all(btn);
-        lv_obj_set_size(btn, 232, 32);
-        lv_obj_set_style_radius(btn, 8, LV_PART_MAIN);
+        lv_obj_set_size(btn, 244, 32);
+        lv_obj_set_style_border_width(btn, 1, LV_PART_MAIN);
+        lv_obj_set_style_border_side(btn, LV_BORDER_SIDE_BOTTOM, LV_PART_MAIN);
+        lv_obj_set_style_border_color(btn, lv_color_hex(T_BORDER_LIGHT), LV_PART_MAIN);
         lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_event_cb(btn, mode_item_click_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)i);
 
@@ -801,14 +797,14 @@ static void create_settings_menu(lv_obj_t *parent)
     s_language_panel = create_panel(s_menu_backdrop, 262, 232);
     create_title(s_language_panel, lang_str(STR_LANG_TITLE));
     {
-        lv_obj_t *lang_list = create_list_container(s_language_panel, 238, 190);
+        lv_obj_t *lang_list = create_list_container(s_language_panel, 238, 148);
         const app_lang_t order[LANG_COUNT] = { LANG_ZH, LANG_EN, LANG_RU, LANG_JA, LANG_KO };
         for (int i = 0; i < LANG_COUNT; i++) {
             app_lang_t l = order[i];
             lv_obj_t *btn = lv_obj_create(lang_list);
             lv_obj_remove_style_all(btn);
-            lv_obj_set_size(btn, 226, 32);
-            lv_obj_set_style_radius(btn, 10, LV_PART_MAIN);
+            lv_obj_set_size(btn, 238, 32);
+            lv_obj_set_style_radius(btn, 0, LV_PART_MAIN);
             ui_style_list_item(btn);
             lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
             lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
@@ -826,7 +822,7 @@ static void create_settings_menu(lv_obj_t *parent)
     /* ================= 二级：相册 ================= */
     s_gallery_panel = create_panel(s_menu_backdrop, 262, 232);
     s_gallery_title = create_title(s_gallery_panel, lang_str(STR_GALLERY));
-    s_gallery_list = create_list_container(s_gallery_panel, 238, 190);
+    s_gallery_list = create_list_container(s_gallery_panel, 238, 148);
     create_back_button(s_gallery_panel, menu_back_to_main_cb);
 
     update_menu_active_style(ir_camera_get_color_mode());
@@ -1299,10 +1295,42 @@ void thermal_ui_show_gallery(void)
 
 void thermal_ui_refresh_language(void)
 {
-    if (label_info) {
-        lv_obj_set_style_text_font(label_info, lang_font(), LV_PART_MAIN);
+    /* HUD 上所有文字都在切语言后需要换字体，否则新语言的字形缺失会显示成空白/方块 */
+    lv_obj_t *labels[] = {
+        label_title, label_fps_float, label_info,
+        tag_max, tag_min, tag_fix, tag_emissivity,
+        s_viewer_title, s_toast_lbl,
+    };
+    for (size_t i = 0; i < sizeof(labels) / sizeof(labels[0]); i++) {
+        if (labels[i]) {
+            lv_obj_set_style_text_font(labels[i], lang_font(), LV_PART_MAIN);
+        }
     }
-    if (s_toast_lbl) {
-        lv_obj_set_style_text_font(s_toast_lbl, lang_font(), LV_PART_MAIN);
+    if (label_title) {
+        lv_label_set_text_fmt(label_title, "%s: %s", lang_str(STR_MODE),
+                              ir_color_get_mode_name(ir_camera_get_color_mode()));
+    }
+
+    /* 菜单里的文字是创建时写死的，切换语言后整体重建一次 */
+    if (s_ui_root) {
+        if (s_menu_backdrop) {
+            lv_obj_del(s_menu_backdrop);
+            s_menu_backdrop   = NULL;
+            s_main_menu_panel = NULL;
+            s_main_menu_list  = NULL;
+            s_palette_panel   = NULL;
+            s_language_panel  = NULL;
+            s_gallery_panel   = NULL;
+            s_gallery_list    = NULL;
+            s_gallery_title   = NULL;
+            s_list_cont       = NULL;
+            s_menu_title      = NULL;
+            for (int i = 0; i < IR_COLOR_MODE_MAX; i++) {
+                s_mode_btns[i] = NULL;
+                s_mode_lbls[i] = NULL;
+                s_mode_chks[i] = NULL;
+            }
+        }
+        create_settings_menu(s_ui_root);
     }
 }

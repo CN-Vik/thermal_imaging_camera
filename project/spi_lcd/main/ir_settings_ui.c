@@ -236,20 +236,21 @@ static esp_err_t init_backlight_pwm(void)
 
 static void render_main_page(void);
 
+/* 菜单刚打开后的短时间内忽略点击，避免长按松手时误触第一项进入二级菜单 */
+static bool menu_click_guard(void)
+{
+    return (lv_tick_elaps(s_open_ms) < 500);
+}
+
 static void header_back_event_cb(lv_event_t *event)
 {
     if (lv_event_get_code(event) != LV_EVENT_CLICKED) return;
+    if (menu_click_guard()) return;
     if (s_current_page == PAGE_MAIN) {
         ir_settings_ui_close();
     } else {
         render_main_page();
     }
-}
-
-/* 菜单刚打开后的短时间内忽略点击，避免长按松手时误触第一项进入二级菜单 */
-static bool menu_click_guard(void)
-{
-    return (lv_tick_elaps(s_open_ms) < 500);
 }
 
 static void menu_item_event_cb(lv_event_t *event)

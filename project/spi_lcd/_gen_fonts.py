@@ -104,32 +104,42 @@ def collect_chars(lang):
 def render_glyph(font, ch):
     ascent, descent = font.getmetrics()
     adv = font.getlength(ch)
-    adv_w = int(round(adv * 16))
     W = int(math.ceil(adv)) + 8
     H = ascent + descent + 4
     img = Image.new("L", (W, H), 0)
     d = ImageDraw.Draw(img)
-    d.text((4, 2), ch, font=font, fill=255, stroke_width=1, stroke_fill=255)
+    # 不使用描边：描边会让墨迹超出字形步进，相邻字母互相压叠（看起来像 "Bacck"）
+    d.text((4, 2), ch, font=font, fill=255)
     bbox = img.getbbox()
     if bbox is None:
-        return {"adv_w": adv_w, "box_w": 0, "box_h": 0, "ofs_x": 0, "ofs_y": 0, "bitmap": b""}
+        return {"adv_w": int(round(adv * 16)), "box_w": 0, "box_h": 0,
+                "ofs_x": 0, "ofs_y": 0, "bitmap": b""}
     min_x, min_y, max_x, max_y = bbox
     box_w = max_x - min_x
     box_h = max_y - min_y
     ofs_x = min_x - 4
     ofs_y = 2 + ascent - max_y
+    # 步进必须能容纳整块墨迹，否则相邻字符会重叠
+    adv_px = max(round(adv), ofs_x + box_w)
+    adv_w = int(adv_px * 16)
     region = img.crop((min_x, min_y, max_x, max_y))
-    px = region.getdata()
+    px = region.tobytes()  # mode "L"，逐行排列，每像素 1 字节
     out = bytearray()
+    # LVGL 读取字形位图时行跨度是 box_w * bpp 位（连续位流，行间不补齐到字节）。
+    # 4bpp 下若 box_w 为奇数，行跨度就不是 8 的整数倍，按字节对齐打包会错位，
+    # 表现为文字出现横线/乱码。这里把 box_w 统一补成偶数，右侧补一列全透明像素。
+    row_w = box_w + (box_w & 1)
     for y in range(box_h):
         row = []
+        base = y * box_w
         for x in range(box_w):
-            row.append(px[y * box_w + x] >> 4)
-        for i in range(0, box_w, 2):
-            hi = row[i]
-            lo = row[i + 1] if i + 1 < box_w else 0
-            out.append((hi << 4) | lo)
-    return {"adv_w": adv_w, "box_w": box_w, "box_h": box_h, "ofs_x": ofs_x, "ofs_y": ofs_y, "bitmap": bytes(out)}
+            row.append(px[base + x] >> 4)
+        if row_w != box_w:
+            row.append(0)
+        for i in range(0, row_w, 2):
+            out.append((row[i] << 4) | row[i + 1])
+    return {"adv_w": adv_w, "box_w": row_w, "box_h": box_h, "ofs_x": ofs_x,
+            "ofs_y": ofs_y, "bitmap": bytes(out)}
 
 def gen_font(lang):
     ttf, idx, size = FONT_SPECS[lang]
