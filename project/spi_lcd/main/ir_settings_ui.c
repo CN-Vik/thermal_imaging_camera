@@ -1476,7 +1476,7 @@ esp_err_t ir_settings_ui_init(void)
             .fixture_px_x = MLX_INTERP_W / 2,
             .fixture_px_y = MLX_INTERP_H / 2,
             .rotate = IR_ROT_0,
-            .mirror_vertical = true,
+            .mirror_vertical = false,
             .mirror_horizontal = false,
             .temp_scale = IR_SCALE_CELSIUS,
             .brightness = 50,
