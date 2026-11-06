@@ -16,12 +16,21 @@
 
 static const char *TAG = "mlx_app";
 
+/* 本机安装方向：上下方向保持现状，只强制左右翻转。
+ * 若以后传感器与屏幕的安装方向改变，再将其改为 0。 */
+#define IR_FORCE_HORIZONTAL_MIRROR  1
+
+static inline bool ir_horizontal_mirror_enabled(void)
+{
+    return (IR_FORCE_HORIZONTAL_MIRROR != 0);
+}
+
 TaskHandle_t ir_task_Handle = NULL;
 
 #define IR_SETTINGS_NVS_NAMESPACE "ir_settings"
 #define IR_SETTINGS_NVS_KEY       "app"
 #define IR_SETTINGS_MAGIC         0x49525354U
-#define IR_SETTINGS_VERSION       1U
+#define IR_SETTINGS_VERSION       3U
 
 typedef struct {
     uint32_t magic;
@@ -39,7 +48,7 @@ static const ir_app_settings_t s_default_settings = {
     .fixture_px_y = MLX_INTERP_H / 2,
     .rotate = IR_ROT_0,
     .mirror_vertical = true,
-    .mirror_horizontal = false,
+    .mirror_horizontal = true,
     .temp_scale = IR_SCALE_CELSIUS,
     .brightness = 50,
     .auto_sleep_min = 30,
@@ -60,7 +69,7 @@ ir_app_settings_t g_ir_settings = {
     .fixture_px_y = MLX_INTERP_H / 2,
     .rotate = IR_ROT_0,
     .mirror_vertical = true,
-    .mirror_horizontal = false,
+    .mirror_horizontal = true,
     .temp_scale = IR_SCALE_CELSIUS,
     .brightness = 50,
     .auto_sleep_min = 30,
@@ -492,10 +501,12 @@ static void spatial_gaussian_denoise(const float *src, float *dst, int w, int h)
                         continue;
                     }
 
-                    /* Keep edges from spreading heat into narrow cool gaps. */
+                    /* 同样加入非对称防漏热保护，防止高斯模式把高温手指扩散到低温指缝 */
+                    float diff = value - center;
+                    float thresh = (diff > 0.0f) ? 0.65f : 1.65f;
                     float weight = kernel[dy + 1][dx + 1];
-                    if (fabsf(value - center) > 2.0f) {
-                        weight *= 0.15f;
+                    if (fabsf(diff) > thresh) {
+                        weight *= 0.05f;
                     }
                     sum += value * weight;
                     weight_sum += weight;
@@ -521,10 +532,9 @@ static void apply_spatial_filter(const float *filtered, const float *median,
         spatial_gaussian_denoise(median, dst, MLX_RAW_W, MLX_RAW_H);
         break;
     case IR_FILTER_BILATERAL:
-        spatial_bilateral_denoise(filtered, dst, MLX_RAW_W, MLX_RAW_H);
-        break;
     case IR_FILTER_BSPLINE:
     default:
+        /* 始终基于 3x3 鲁棒中值滤波后的 median 进行双边保边滤波，与原版流水线完全一致 */
         spatial_bilateral_denoise(median, dst, MLX_RAW_W, MLX_RAW_H);
         break;
     }
@@ -562,18 +572,6 @@ esp_err_t ir_camera_app_init(void)
     return ESP_OK;
 }
 
-/*
- * 初始化热成像颜色查找表
- *
- * IR_COLOR_IRONBOW:
- *     保留原有铁红伪彩效果
- *
- * IR_COLOR_WHITE_HOT:
- *     低温黑色 -> 高温白色
- *
- * IR_COLOR_BLACK_HOT:
- *     低温白色 -> 高温黑色
- */
 /*
  * 初始化热成像颜色查找表（直接复用 ir_color_modes.c 的颜色配置逻辑）
  */
@@ -650,6 +648,8 @@ static void settings_clamp_to_valid_ranges(void)
 esp_err_t ir_camera_settings_load(void)
 {
     g_ir_settings = s_default_settings;
+    bool need_save_defaults = false;
+    bool need_save_settings = false;
 
     nvs_handle_t handle;
     esp_err_t err = nvs_open(IR_SETTINGS_NVS_NAMESPACE, NVS_READONLY, &handle);
@@ -660,25 +660,46 @@ esp_err_t ir_camera_settings_load(void)
         nvs_close(handle);
 
         if (err == ESP_OK && size == sizeof(blob) &&
-            blob.magic == IR_SETTINGS_MAGIC && blob.version == IR_SETTINGS_VERSION) {
+            blob.magic == IR_SETTINGS_MAGIC &&
+            (blob.version == IR_SETTINGS_VERSION || blob.version == 2U)) {
             g_ir_settings = blob.settings;
-        } else if (err == ESP_ERR_NVS_NOT_FOUND) {
+            /* 兼容上一版 v2 配置：保留用户其他设置，只升级方向字段和版本号。 */
+            if (blob.version != IR_SETTINGS_VERSION) {
+                need_save_settings = true;
+            }
+        } else {
+            /* 版本号升级或首次无数据时，使用最新默认配置并覆写 NVS */
+            need_save_defaults = true;
             err = ESP_OK;
-        } else if (err == ESP_OK) {
-            err = ESP_ERR_INVALID_VERSION;
         }
     } else if (err == ESP_ERR_NVS_NOT_FOUND) {
+        need_save_defaults = true;
         err = ESP_OK;
     }
+
+    /* 固定本机热像左右方向，防止 NVS 中旧值或设置页旧值覆盖。 */
+    if (g_ir_settings.mirror_horizontal != ir_horizontal_mirror_enabled()) {
+        need_save_settings = true;
+    }
+    g_ir_settings.mirror_horizontal = ir_horizontal_mirror_enabled();
+    ESP_LOGI(TAG, "Display transform: rot=%d mirror_x=%d mirror_y=%d (horizontal mirror forced)",
+             (int)g_ir_settings.rotate,
+             (int)g_ir_settings.mirror_horizontal,
+             (int)g_ir_settings.mirror_vertical);
 
     settings_clamp_to_valid_ranges();
     ir_camera_update_transform();
     ir_camera_set_color_mode(g_ir_settings.color_mode);
+
+    if (need_save_defaults || need_save_settings) {
+        ir_camera_settings_save();
+    }
     return err;
 }
 
 esp_err_t ir_camera_settings_save(void)
 {
+    g_ir_settings.mirror_horizontal = ir_horizontal_mirror_enabled();
     settings_clamp_to_valid_ranges();
 
     ir_settings_nvs_blob_t blob = {
@@ -745,7 +766,7 @@ static inline void screen_xy_to_source_fp(int x, int y, int src_w, int src_h,
                                           int dst_w, int dst_h,
                                           uint32_t *col_fp, uint32_t *row_fp)
 {
-    int mx = g_ir_settings.mirror_horizontal ? (dst_w - 1 - x) : x;
+    int mx = ir_horizontal_mirror_enabled() ? (dst_w - 1 - x) : x;
     int my = g_ir_settings.mirror_vertical ? (dst_h - 1 - y) : y;
 
     switch (g_ir_settings.rotate) {
@@ -805,7 +826,7 @@ static inline void raw_rc_to_screen_xy(int raw_r, int raw_c, int *px_x, int *px_
         break;
     }
 
-    if (g_ir_settings.mirror_horizontal) x = (MLX_INTERP_W - 1) - x;
+    if (ir_horizontal_mirror_enabled()) x = (MLX_INTERP_W - 1) - x;
     if (g_ir_settings.mirror_vertical) y = (MLX_INTERP_H - 1) - y;
 
     *px_x = clamp_int_local(x, 0, MLX_INTERP_W - 1);
@@ -829,36 +850,92 @@ static inline int screen_xy_to_raw_idx(int px_x, int px_y)
     return raw_r * MLX_RAW_W + raw_c;
 }
 
+/*
+ * 全屏双线性插值（恢复原版外层行预计算优化，同时兼容 0/90/180/270 度旋转与镜像）
+ */
 static void bilinear_scale_fullscreen_1to1(const uint8_t *src, int src_w, int src_h,
                                            uint16_t *dst, int dst_w, int dst_h,
                                            const uint16_t *lut)
 {
     if (!s_transform_valid) ir_camera_update_transform();
 
-    for (int y = 0; y < dst_h; y++) {
-        uint16_t *dst_row = &dst[y * dst_w];
-        for (int x = 0; x < dst_w; x++) {
-            uint32_t col_fp;
-            uint32_t row_fp;
-            screen_xy_to_source_fp(x, y, src_w, src_h, dst_w, dst_h,
-                                   &col_fp, &row_fp);
+    const ir_rotate_t rot = g_ir_settings.rotate;
+    const bool mirror_x = ir_horizontal_mirror_enabled();
+    const bool flip_x = (rot == IR_ROT_90 || rot == IR_ROT_180)
+                        ? !mirror_x
+                        : mirror_x;
+    const bool flip_y = (rot == IR_ROT_180 || rot == IR_ROT_270)
+                        ? !g_ir_settings.mirror_vertical
+                        : g_ir_settings.mirror_vertical;
 
-            int c0 = col_fp >> 16;
-            int r0 = row_fp >> 16;
+    const uint32_t max_col_fp = (uint32_t)(src_w - 1) << 16;
+    const uint32_t max_row_fp = (uint32_t)(src_h - 1) << 16;
+
+    if (rot == IR_ROT_90 || rot == IR_ROT_270) {
+        for (int y = 0; y < dst_h; y++) {
+            int eff_y = flip_y ? (dst_h - 1 - y) : y;
+            uint32_t c_fp = (uint32_t)eff_y * s_source_col_step_fp;
+            if (c_fp > max_col_fp) c_fp = max_col_fp;
+
+            int c0 = c_fp >> 16;
             int c1 = (c0 < src_w - 1) ? (c0 + 1) : c0;
-            int r1 = (r0 < src_h - 1) ? (r0 + 1) : r0;
-            uint32_t c_diff = col_fp & 0xFFFFU;
-            uint32_t r_diff = row_fp & 0xFFFFU;
-            uint32_t c_inv = 65536U - c_diff;
-            uint32_t r_inv = 65536U - r_diff;
+            uint32_t c_diff = c_fp & 0xFFFFU;
+            uint32_t c_diff_inv = 65536U - c_diff;
+            uint16_t *dst_row = &dst[y * dst_w];
 
-            uint32_t top = ((uint32_t)src[r0 * src_w + c0] * c_inv +
-                            (uint32_t)src[r0 * src_w + c1] * c_diff) >> 16;
-            uint32_t bottom = ((uint32_t)src[r1 * src_w + c0] * c_inv +
-                               (uint32_t)src[r1 * src_w + c1] * c_diff) >> 16;
-            uint32_t val = (top * r_inv + bottom * r_diff) >> 16;
-            if (val > 255U) val = 255U;
-            dst_row[x] = lut[val];
+            for (int x = 0; x < dst_w; x++) {
+                int eff_x = flip_x ? (dst_w - 1 - x) : x;
+                uint32_t r_fp = (uint32_t)eff_x * s_source_row_step_fp;
+                if (r_fp > max_row_fp) r_fp = max_row_fp;
+
+                int r0 = r_fp >> 16;
+                int r1 = (r0 < src_h - 1) ? (r0 + 1) : r0;
+                uint32_t r_diff = r_fp & 0xFFFFU;
+                uint32_t r_diff_inv = 65536U - r_diff;
+
+                const uint8_t *p_r0 = &src[r0 * src_w];
+                const uint8_t *p_r1 = &src[r1 * src_w];
+
+                uint32_t row0 = (p_r0[c0] * c_diff_inv + p_r0[c1] * c_diff) >> 16;
+                uint32_t row1 = (p_r1[c0] * c_diff_inv + p_r1[c1] * c_diff) >> 16;
+                uint32_t val  = (row0 * r_diff_inv + row1 * r_diff) >> 16;
+                if (val > 255U) val = 255U;
+
+                dst_row[x] = lut[val];
+            }
+        }
+    } else {
+        for (int y = 0; y < dst_h; y++) {
+            int eff_y = flip_y ? (dst_h - 1 - y) : y;
+            uint32_t r_fp = (uint32_t)eff_y * s_source_row_step_fp;
+            if (r_fp > max_row_fp) r_fp = max_row_fp;
+
+            int r0 = r_fp >> 16;
+            int r1 = (r0 < src_h - 1) ? (r0 + 1) : r0;
+            uint32_t r_diff = r_fp & 0xFFFFU;
+            uint32_t r_diff_inv = 65536U - r_diff;
+
+            const uint8_t *p_r0 = &src[r0 * src_w];
+            const uint8_t *p_r1 = &src[r1 * src_w];
+            uint16_t *dst_row = &dst[y * dst_w];
+
+            for (int x = 0; x < dst_w; x++) {
+                int eff_x = flip_x ? (dst_w - 1 - x) : x;
+                uint32_t c_fp = (uint32_t)eff_x * s_source_col_step_fp;
+                if (c_fp > max_col_fp) c_fp = max_col_fp;
+
+                int c0 = c_fp >> 16;
+                int c1 = (c0 < src_w - 1) ? (c0 + 1) : c0;
+                uint32_t c_diff = c_fp & 0xFFFFU;
+                uint32_t c_diff_inv = 65536U - c_diff;
+
+                uint32_t top = (p_r0[c0] * c_diff_inv + p_r0[c1] * c_diff) >> 16;
+                uint32_t bot = (p_r1[c0] * c_diff_inv + p_r1[c1] * c_diff) >> 16;
+                uint32_t val = (top * r_diff_inv + bot * r_diff) >> 16;
+                if (val > 255U) val = 255U;
+
+                dst_row[x] = lut[val];
+            }
         }
     }
 }
@@ -970,13 +1047,20 @@ static void temperature_to_norm_u8(const float *src, uint8_t *dst,
     }
 
     float range_inv = 1.0f / delta;
+    float gamma = clampf_local(g_ir_settings.gamma, 0.5f, 3.0f);
+    bool use_default_gamma = (fabsf(gamma - 1.5f) < 0.01f);
 
     for (int i = 0; i < MLX_RAW_PIXELS; i++) {
         float norm = (src[i] - map_min) * range_inv;
         norm = clampf_local(norm, 0.0f, 1.0f);
 
-        /* Gamma 由设置页运行期调整；默认 1.5 与原显示曲线保持一致。 */
-        norm = powf(norm, clampf_local(g_ir_settings.gamma, 0.5f, 3.0f));
+        /*
+         * 恢复原版温和对比度曲线 (0.65 * norm^gamma + 0.35 * norm)：
+         * 默认 gamma=1.5 时使用快速 norm * sqrtf(norm)，与 origin_ir_mlx90640_app.c 完全一致；
+         * 既压低背景暗部噪点，又保留手掌高温区和边缘的细节层次。
+         */
+        float gamma_curve = use_default_gamma ? (norm * sqrtf(norm)) : powf(norm, gamma);
+        norm = 0.65f * gamma_curve + 0.35f * norm;
 
         dst[i] = (uint8_t)(norm * 255.0f + 0.5f);
     }
@@ -990,7 +1074,6 @@ void ir_camera_task_main(void *pvParameters)
     ESP_LOGI(TAG, "Thermal map: fixed range %.1fC ~ %.1fC, auto_range=%d",
              THERMAL_FIXED_MIN_C, THERMAL_FIXED_MAX_C, THERMAL_USE_AUTO_RANGE);
 
-    // init_ironbow_lut();
     init_thermal_color_lut(g_ir_settings.color_mode);
 
     MLX90640_I2CInit();
@@ -1089,7 +1172,7 @@ void ir_camera_task_main(void *pvParameters)
             spatial_median_outlier_filter(filtered_temp, median_temp,
                                           MLX_RAW_W, MLX_RAW_H);
 
-            // 4. 按设置页选择的滤波算法生成最终的测温/显示矩阵
+            // 4. 按设置页选择的滤波算法生成最终的测温/显示矩阵（默认与原版双边滤波完全一致）
             apply_spatial_filter(filtered_temp, median_temp, spatial_temp,
                                  (int)g_ir_settings.filter_mode);
 
