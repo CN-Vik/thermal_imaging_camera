@@ -1387,7 +1387,7 @@ static void render_about_page(void)
     lv_obj_set_style_text_color(title, lv_color_hex(UI_TEXT_DARK), LV_PART_MAIN);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-    lv_label_set_text(title, "MLX90640 Thermal Camera");
+    lv_label_set_text(title, "RT Thermal Camera V2.1");
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 49);
 
     lv_obj_t *version = lv_label_create(s_body);
@@ -1395,8 +1395,7 @@ static void render_about_page(void)
     lv_obj_set_style_text_font(version, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_set_style_text_align(version, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_label_set_text(version,
-                      "STM32-style settings panel\n"
-                      "LVGL 8  |  280 x 240 landscape\n"
+                      "LVGL 8  |  280 x 240 Landscape\n"
                       "Sensor: 32 x 24, 16 Hz");
     lv_obj_align(version, LV_ALIGN_TOP_MID, 0, 76);
 }
