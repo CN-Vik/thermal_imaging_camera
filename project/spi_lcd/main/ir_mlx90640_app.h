@@ -25,7 +25,6 @@ extern "C" {
 #define MLX90640_ADDR           0x33
 #define TA_SHIFT                8
 
-#define FPS1HZ                  0x01
 #define FPS2HZ                  0x02
 #define FPS4HZ                  0x03
 #define FPS8HZ                  0x04

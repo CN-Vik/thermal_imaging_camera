@@ -122,18 +122,21 @@ ir_app_settings_t g_ir_settings = {
 #define THERMAL_PERCENTILE_HIGH          95
 
 /* 降发热优化：
- * - IR_IDLE_REFRESH：画面被遮挡时传感器降到的刷新率（1Hz，电流约 33mA -> 20mA，
- *   显著降低 MLX90640 自发热）
+ * - 画面被遮挡时不做采集/计算/送显，但**绝不改写传感器刷新率寄存器**：
+ *   运行中写 CTRL 会重启测量周期，退出菜单后第一帧要等很久才到，
+ *   表现为"屏幕卡一下然后出现错图"。
  * - THERMAL_HIST_BINS：温度直方图分位数桶数（0.1℃ 分辨率，1~200℃），
  *   以 O(n) 直方图替代每帧 qsort 768 个 float
  */
-#define IR_IDLE_REFRESH                  FPS1HZ
 #define THERMAL_HIST_BINS                2000
+
+/* 退出遮挡后需要丢弃的新帧数：保证两个子场都是新数据再恢复显示 */
+#define IR_RESYNC_FRAMES                 2
 
 #define IR_SCREEN_W     280
 #define IR_SCREEN_H     240
-#define IR_TAG_GUESS_W  88
-#define IR_TAG_GUESS_H  22
+#define IR_TAG_GUESS_W  104
+#define IR_TAG_GUESS_H  26
 
 
 static void place_temp_tag(lv_obj_t *tag, int px, int py, const char *text)
@@ -1069,20 +1072,6 @@ static void temperature_to_norm_u8(const float *src, uint8_t *dst,
     }
 }
 
-/* 当前实际生效的传感器刷新率（遮挡/恢复时切换，避免重复写寄存器） */
-static uint8_t s_cur_refresh_rate = RefreshRate;
-
-/* 非阻塞查询 MLX90640 新帧就绪标志（状态寄存器 bit3）。
- * 空闲场景配合 200ms 长延时使用，让两个核能进入 light sleep 深睡。 */
-static bool ir_sensor_data_ready(void)
-{
-    uint16_t status_reg = 0;
-    if (MLX90640_I2CRead(MLX90640_ADDR, MLX90640_STATUS_REG, 1, &status_reg) != MLX90640_NO_ERROR) {
-        return false;
-    }
-    return MLX90640_GET_DATA_READY(status_reg) != 0;
-}
-
 void ir_camera_task_main(void *pvParameters)
 {
     (void)pvParameters;
@@ -1144,35 +1133,47 @@ void ir_camera_task_main(void *pvParameters)
 
     bool subpage_init[2] = {false, false};
 
+    bool ui_was_blocked = false;
+    int  resync_left = 0;
+
     while (1) {
-        /* ============ 降发热优化 2：画面被遮挡时传感器降频、流水线停摆 ============
-         * 设置页/相册/调色板/照片查看/息屏都是全屏遮挡，热像图完全不可见：
-         * - 曲线页还需要数据：传感器降到 4Hz 继续跑测温流水线（只喂曲线，不送显）
-         * - 其余遮挡场景：传感器降到 1Hz（电流约 33mA -> 20mA），只读帧清状态
-         * 返回主界面后自动恢复 16Hz。
+        /* ============ 降发热优化：画面被遮挡时流水线停摆 ============
+         * 设置页/相册/调色板/照片查看/息屏都是全屏遮挡，热像图完全不可见，
+         * 此时完全不做采集/滤波/送显（曲线页除外，它还需要数据）。
+         *
+         * 注意：这里**不再**改写 MLX90640 刷新率寄存器。之前在遮挡时把传感器
+         * 切到 1Hz、退出时切回 16Hz，运行中写 CTRL 会重启传感器测量周期，
+         * 退出菜单后第一帧要等近 1 秒才到 —— 这就是"屏幕卡一下"的直接原因。
+         * 传感器保持在开机时设定的 16Hz（与原来一致，无运行时寄存器写入）。
          */
-        bool ui_blocked = ir_settings_ui_is_open() ||
-                          thermal_ui_view_blocking() ||
-                          ir_settings_ui_screen_sleeping();
+        bool ui_blocked = false;
+        bool chart_active = false;
+        /* UI 状态查询会读 LVGL 对象（菜单/相册面板可能被删除重建），
+         * 必须在 LVGL 互斥锁内进行，否则有读到已释放对象的风险。
+         * 拿不到锁时按"未遮挡"处理，保证热像仍然正常刷新。 */
+        if (example_lvgl_lock(50)) {
+            ui_blocked = ir_settings_ui_is_open() ||
+                         thermal_ui_view_blocking() ||
+                         ir_settings_ui_screen_sleeping();
+            chart_active = ir_settings_ui_chart_page_active();
+            example_lvgl_unlock();
+        }
 
         if (ui_blocked) {
-            bool chart_active = ir_settings_ui_chart_page_active();
-            uint8_t idle_rate = chart_active ? FPS4HZ : IR_IDLE_REFRESH;
-            if (s_cur_refresh_rate != idle_rate) {
-                MLX90640_SetRefreshRate(MLX90640_ADDR, idle_rate);
-                s_cur_refresh_rate = idle_rate;
-            }
             if (!chart_active) {
-                /* 低频空转：仅在新帧就绪时清掉数据，其余时间 200ms 深睡 */
-                if (ir_sensor_data_ready()) {
-                    MLX90640_GetFrameData(MLX90640_ADDR, ir_frame_data);
-                }
-                vTaskDelay(pdMS_TO_TICKS(200));
+                ui_was_blocked = true;
+                vTaskDelay(pdMS_TO_TICKS(100));
                 continue;
             }
-        } else if (s_cur_refresh_rate != RefreshRate) {
-            MLX90640_SetRefreshRate(MLX90640_ADDR, RefreshRate);
-            s_cur_refresh_rate = RefreshRate;
+        } else if (ui_was_blocked) {
+            /* 退出遮挡：遮挡期间 raw_temp_matrix 只留着旧的半边数据，
+             * 若直接显示会得到"一半旧一半新"的错图。
+             * 先清 data-ready 标志强制等新帧，再丢弃 IR_RESYNC_FRAMES 帧，
+             * 确保两个子场都是新数据后才恢复显示。 */
+            ui_was_blocked = false;
+            MLX90640_I2CWrite(MLX90640_ADDR, MLX90640_STATUS_REG,
+                              MLX90640_INIT_STATUS_VALUE);
+            resync_left = IR_RESYNC_FRAMES;
         }
 
         int status = MLX90640_GetFrameData(MLX90640_ADDR, ir_frame_data);
@@ -1203,6 +1204,18 @@ void ir_camera_task_main(void *pvParameters)
 
             subpage_init[subpage] = true;
             frame_count++;
+
+            if (resync_left > 0) {
+                /* 重新同步：丢弃前 IR_RESYNC_FRAMES 帧，让两个子场都刷新成新数据。
+                 * 丢弃期间不解算滤波，直接把原始温度同步给时域滤波状态，
+                 * 避免把遮挡前的旧温度带回来产生"重影"。 */
+                if (--resync_left == 0) {
+                    memcpy(filtered_temp, raw_temp_matrix, MLX_RAW_PIXELS * sizeof(float));
+                    range_initialized = false;   /* 让自动量程重新平滑，避免色阶突变 */
+                }
+                vTaskDelay(pdMS_TO_TICKS(2));
+                continue;
+            }
 
             if (!subpage_init[0] || !subpage_init[1]) {
                 // 首轮先将 raw_temp_matrix 同步到 filtered_temp

@@ -1209,7 +1209,7 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
     // 3. 左上角帧率小药丸（白底蓝字，位于标题下方一行，避免与顶部标题胶囊重叠）
     label_fps_float = lv_label_create(ui_root);
     ui_style_pill(label_fps_float, T_ITEM_BORDER, T_PRIMARY, LV_OPA_60);
-    lv_obj_set_style_text_font(label_fps_float, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(label_fps_float, lang_font(), LV_PART_MAIN);
     lv_obj_set_style_pad_hor(label_fps_float, 8, LV_PART_MAIN);
     lv_obj_set_style_pad_ver(label_fps_float, 2, LV_PART_MAIN);
     lv_obj_set_pos(label_fps_float, 6, 34);
@@ -1218,7 +1218,7 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
     // 4. 右上角发射率小药丸（白底中蓝字）
     tag_emissivity = lv_label_create(ui_root);
     ui_style_pill(tag_emissivity, T_BORDER_LIGHT, T_TEXT_MID, LV_OPA_60);
-    lv_obj_set_style_text_font(tag_emissivity, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(tag_emissivity, lang_font(), LV_PART_MAIN);
     lv_obj_set_style_pad_hor(tag_emissivity, 8, LV_PART_MAIN);
     lv_obj_set_style_pad_ver(tag_emissivity, 2, LV_PART_MAIN);
     lv_obj_align(tag_emissivity, LV_ALIGN_TOP_RIGHT, -6, 34);
