@@ -26,6 +26,7 @@
 #include "esp_lcd_touch_cst816s.h"
 #include "driver/i2c_master.h"
 #include "esp_lcd_panel_st7789.h"
+#include "esp_pm.h"
 #include "driver/gpio.h"
 
 // #if CONFIG_EXAMPLE_LCD_TOUCH_CONTROLLER_STMPE610
@@ -89,7 +90,7 @@ static const char *TAG = "thermal imaging_eg";
 #define EXAMPLE_LCD_CMD_BITS 8
 #define EXAMPLE_LCD_PARAM_BITS 8
 
-#define EXAMPLE_LVGL_TICK_PERIOD_MS 2
+#define EXAMPLE_LVGL_TICK_PERIOD_MS 5
 #define EXAMPLE_LVGL_TASK_MAX_DELAY_MS 500
 #define EXAMPLE_LVGL_TASK_MIN_DELAY_MS 1
 #define EXAMPLE_LVGL_TASK_STACK_SIZE (8 * 1024)
@@ -197,12 +198,7 @@ static void example_lvgl_touch_cb(lv_indev_drv_t *drv, lv_indev_data_t *data)
         // 扣除屏幕控制器的 20px GAP 偏移（根据实际点按校准）
         int16_t y = touchpad_y[0] - 20;
         data->point.y = (y < 0) ? 0 : y;
-        // data->point.y = touchpad_y[0];
         data->state = LV_INDEV_STATE_PRESSED;
-    
-        // 临时测试打印
-        ESP_LOGI(TAG, "Touch_raw:[%d, %d]->mapped:[%d, %d]", 
-             touchpad_x[0], touchpad_y[0], data->point.x, data->point.y);
     }
     else
     {
@@ -271,6 +267,33 @@ void app_main(void)
     static lv_disp_drv_t disp_drv;      // contains callback functions
 
     power_on();
+
+#if CONFIG_PM_ENABLE
+    /* ============ 降发热：空闲自动进入 light sleep ============
+     * 等待 MLX90640 下一帧（约 60ms）时两个核都会空闲，
+     * 自动休眠把平均电流从 40mA 级降到 10mA 以下，芯片温度大幅下降。
+     */
+    esp_pm_config_t pm_config = {
+        .max_freq_mhz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
+        .min_freq_mhz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
+        .light_sleep_enable = true,
+    };
+    ESP_ERROR_CHECK(esp_pm_configure(&pm_config));
+
+    /* 休眠时 GPIO 会被隔离省电（PM_SLP_DISABLE_GPIO 由 S3 复位工作区自动开启）。
+     * 下面这些引脚必须保持原状态，否则电源自锁/屏幕复位/背光在休眠时可能失效或闪烁。 */
+    static const int keep_gpios[] = {
+        PIN_PWR_HOLD, PIN_KEY_DET,
+        EXAMPLE_PIN_NUM_SCLK, EXAMPLE_PIN_NUM_MOSI,
+        EXAMPLE_PIN_NUM_LCD_DC, EXAMPLE_PIN_NUM_LCD_RST,
+        EXAMPLE_PIN_NUM_LCD_CS, EXAMPLE_PIN_NUM_BK_LIGHT,
+        EXAMPLE_PIN_NUM_TOUCH_SCL, EXAMPLE_PIN_NUM_TOUCH_SDA,
+        EXAMPLE_PIN_NUM_TOUCH_INT,
+    };
+    for (size_t i = 0; i < sizeof(keep_gpios) / sizeof(keep_gpios[0]); i++) {
+        gpio_sleep_sel_dis(keep_gpios[i]);
+    }
+#endif
 
     ESP_LOGI(TAG, "Turn_off_LCD_backlight");
     gpio_config_t bk_gpio_config = {

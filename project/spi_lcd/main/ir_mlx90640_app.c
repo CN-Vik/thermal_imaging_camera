@@ -12,6 +12,7 @@
 #include "MLX90640_I2C_Driver.h"
 #include "MLX90640_API.h"
 #include "ir_mlx90640_app.h"
+#include "ir_settings_ui.h"
 #include "lang.h"
 
 static const char *TAG = "mlx_app";
@@ -119,6 +120,15 @@ ir_app_settings_t g_ir_settings = {
 #define AUTO_RANGE_ALPHA                0.04f
 #define THERMAL_PERCENTILE_LOW           5
 #define THERMAL_PERCENTILE_HIGH          95
+
+/* 降发热优化：
+ * - IR_IDLE_REFRESH：画面被遮挡时传感器降到的刷新率（1Hz，电流约 33mA -> 20mA，
+ *   显著降低 MLX90640 自发热）
+ * - THERMAL_HIST_BINS：温度直方图分位数桶数（0.1℃ 分辨率，1~200℃），
+ *   以 O(n) 直方图替代每帧 qsort 768 个 float
+ */
+#define IR_IDLE_REFRESH                  FPS1HZ
+#define THERMAL_HIST_BINS                2000
 
 #define IR_SCREEN_W     280
 #define IR_SCREEN_H     240
@@ -374,13 +384,6 @@ static void spatial_median_outlier_filter(const float *src, float *dst, int w, i
             }
         }
     }
-}
-
-static int compare_float_ascending(const void *a, const void *b)
-{
-    float x = *(const float *)a;
-    float y = *(const float *)b;
-    return (x > y) - (x < y);
 }
 
 /*
@@ -1066,6 +1069,20 @@ static void temperature_to_norm_u8(const float *src, uint8_t *dst,
     }
 }
 
+/* 当前实际生效的传感器刷新率（遮挡/恢复时切换，避免重复写寄存器） */
+static uint8_t s_cur_refresh_rate = RefreshRate;
+
+/* 非阻塞查询 MLX90640 新帧就绪标志（状态寄存器 bit3）。
+ * 空闲场景配合 200ms 长延时使用，让两个核能进入 light sleep 深睡。 */
+static bool ir_sensor_data_ready(void)
+{
+    uint16_t status_reg = 0;
+    if (MLX90640_I2CRead(MLX90640_ADDR, MLX90640_STATUS_REG, 1, &status_reg) != MLX90640_NO_ERROR) {
+        return false;
+    }
+    return MLX90640_GET_DATA_READY(status_reg) != 0;
+}
+
 void ir_camera_task_main(void *pvParameters)
 {
     (void)pvParameters;
@@ -1128,6 +1145,36 @@ void ir_camera_task_main(void *pvParameters)
     bool subpage_init[2] = {false, false};
 
     while (1) {
+        /* ============ 降发热优化 2：画面被遮挡时传感器降频、流水线停摆 ============
+         * 设置页/相册/调色板/照片查看/息屏都是全屏遮挡，热像图完全不可见：
+         * - 曲线页还需要数据：传感器降到 4Hz 继续跑测温流水线（只喂曲线，不送显）
+         * - 其余遮挡场景：传感器降到 1Hz（电流约 33mA -> 20mA），只读帧清状态
+         * 返回主界面后自动恢复 16Hz。
+         */
+        bool ui_blocked = ir_settings_ui_is_open() ||
+                          thermal_ui_view_blocking() ||
+                          ir_settings_ui_screen_sleeping();
+
+        if (ui_blocked) {
+            bool chart_active = ir_settings_ui_chart_page_active();
+            uint8_t idle_rate = chart_active ? FPS4HZ : IR_IDLE_REFRESH;
+            if (s_cur_refresh_rate != idle_rate) {
+                MLX90640_SetRefreshRate(MLX90640_ADDR, idle_rate);
+                s_cur_refresh_rate = idle_rate;
+            }
+            if (!chart_active) {
+                /* 低频空转：仅在新帧就绪时清掉数据，其余时间 200ms 深睡 */
+                if (ir_sensor_data_ready()) {
+                    MLX90640_GetFrameData(MLX90640_ADDR, ir_frame_data);
+                }
+                vTaskDelay(pdMS_TO_TICKS(200));
+                continue;
+            }
+        } else if (s_cur_refresh_rate != RefreshRate) {
+            MLX90640_SetRefreshRate(MLX90640_ADDR, RefreshRate);
+            s_cur_refresh_rate = RefreshRate;
+        }
+
         int status = MLX90640_GetFrameData(MLX90640_ADDR, ir_frame_data);
 
         if (status >= 0) {
@@ -1209,21 +1256,38 @@ void ir_camera_task_main(void *pvParameters)
 
 #if THERMAL_USE_AUTO_RANGE
             // 用 5%/95% 分位数决定颜色映射范围，避免单个异常像素拉伸整幅图像。
-            // median_temp 可复用为排序工作区；spatial_temp 保留原始滤波图用于显示和测温。
+            // 降发热优化：O(n) 直方图分位数替代每帧 qsort 768 个 float。
+            static uint16_t temp_hist[THERMAL_HIST_BINS];
+            memset(temp_hist, 0, sizeof(temp_hist));
             int n_valid = 0;
             for (int i = 0; i < MLX_RAW_PIXELS; i++) {
                 float t = spatial_temp[i];
                 if (isfinite(t) && t > 1.0f && t < 200.0f) {
-                    median_temp[n_valid++] = t;
+                    int bin = (int)((t - 1.0f) * 10.0f);
+                    if (bin < 0) bin = 0;
+                    if (bin >= THERMAL_HIST_BINS) bin = THERMAL_HIST_BINS - 1;
+                    temp_hist[bin]++;
+                    n_valid++;
                 }
             }
 
             float robust_min = cur_min;
             float robust_max = cur_max;
             if (n_valid >= 100) {
-                qsort(median_temp, n_valid, sizeof(float), compare_float_ascending);
-                robust_min = median_temp[(n_valid - 1) * THERMAL_PERCENTILE_LOW / 100];
-                robust_max = median_temp[(n_valid - 1) * THERMAL_PERCENTILE_HIGH / 100];
+                int lo_need = n_valid * THERMAL_PERCENTILE_LOW / 100;
+                int acc = 0, lo_bin = 0;
+                while (lo_bin < THERMAL_HIST_BINS && acc + temp_hist[lo_bin] < lo_need) {
+                    acc += temp_hist[lo_bin++];
+                }
+                robust_min = 1.0f + (float)lo_bin * 0.1f;
+
+                int hi_need = n_valid - n_valid * THERMAL_PERCENTILE_HIGH / 100;
+                acc = 0;
+                int hi_bin = THERMAL_HIST_BINS - 1;
+                while (hi_bin >= 0 && acc + temp_hist[hi_bin] < hi_need) {
+                    acc += temp_hist[hi_bin--];
+                }
+                robust_max = 1.0f + (float)hi_bin * 0.1f;
             }
 
             float target_min = robust_min - AUTO_RANGE_LOW_PADDING_C;
@@ -1298,7 +1362,13 @@ void ir_camera_task_main(void *pvParameters)
                      ir_camera_convert_temp(fixture_t, NULL), unit);
 
             // 7. 映射并进行双线性插值送显
-            if (valid_pts > 400) {
+            /* 降发热优化 1：只在整帧完成（子页0）时送显。
+             * 16Hz 传感器每个子页都全屏重绘 = 16fps 送显；现在只整帧送显（8fps），
+             * LVGL 软件旋转渲染 + 280x240 双线性放大 + SPI 全屏传输全部减半。
+             * 画面被设置页/相册/息屏遮挡时也不送显。 */
+            bool do_display = (!ui_blocked && subpage == 0);
+
+            if (do_display && valid_pts > 400) {
                 temperature_to_norm_u8(spatial_temp, norm_matrix, smooth_min_t, smooth_max_t);
                 memcpy(s_norm_snapshot, norm_matrix, sizeof(s_norm_snapshot));
                 s_snapshot_min_t = smooth_min_t;

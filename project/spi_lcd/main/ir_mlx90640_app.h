@@ -25,6 +25,7 @@ extern "C" {
 #define MLX90640_ADDR           0x33
 #define TA_SHIFT                8
 
+#define FPS1HZ                  0x01
 #define FPS2HZ                  0x02
 #define FPS4HZ                  0x03
 #define FPS8HZ                  0x04
@@ -113,6 +114,7 @@ bool example_lvgl_lock(int timeout_ms);
 void example_lvgl_unlock(void);
 void ir_camera_task_main(void *pvParameters);
 void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp);
+bool thermal_ui_view_blocking(void);
 void ir_camera_set_color_mode(ir_color_mode_t mode);
 ir_color_mode_t ir_camera_get_color_mode(void);
 const uint8_t *ir_camera_get_frame(void);

@@ -1393,6 +1393,19 @@ void thermal_ui_show_gallery(void)
     lv_obj_move_foreground(s_menu_backdrop);
 }
 
+/* 全屏遮挡层（菜单/相册/调色板/语言/照片查看器）是否可见。
+ * IR 任务据此暂停送显并把传感器降到低频，降低功耗与发热。 */
+bool thermal_ui_view_blocking(void)
+{
+    if (s_menu_backdrop && !lv_obj_has_flag(s_menu_backdrop, LV_OBJ_FLAG_HIDDEN)) {
+        return true;
+    }
+    if (s_viewer_overlay && !lv_obj_has_flag(s_viewer_overlay, LV_OBJ_FLAG_HIDDEN)) {
+        return true;
+    }
+    return false;
+}
+
 void thermal_ui_refresh_language(void)
 {
     /* HUD 上所有文字都在切语言后需要换字体，否则新语言的字形缺失会显示成空白/方块 */
