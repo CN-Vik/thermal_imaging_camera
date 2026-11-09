@@ -133,14 +133,14 @@ int MLX90640_I2CWrite(uint8_t slaveAddr,
 
     vTaskDelay(pdMS_TO_TICKS(1));
 
-    /*回读检查下写入的有问题吗*/
-    uint16_t check_data = 0;
-    if (MLX90640_I2CRead(slaveAddr, writeAddress, 1, &check_data) != 0) {
-        return -1;
-    }
-    if (check_data != wr_data) {
-        return -2;
-    }
+    // /*回读检查下写入的有问题吗*/
+    // uint16_t check_data = 0;
+    // if (MLX90640_I2CRead(slaveAddr, writeAddress, 1, &check_data) != 0) {
+    //     return -1;
+    // }
+    // if (check_data != wr_data) {
+    //     return -2;
+    // }
 
     return 0;
 }
