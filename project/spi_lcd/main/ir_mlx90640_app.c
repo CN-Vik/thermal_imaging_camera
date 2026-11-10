@@ -122,8 +122,8 @@ ir_app_settings_t g_ir_settings = {
 
 #define IR_SCREEN_W     280
 #define IR_SCREEN_H     240
-#define IR_TAG_GUESS_W  88
-#define IR_TAG_GUESS_H  22
+#define IR_TAG_GUESS_W  108
+#define IR_TAG_GUESS_H  26
 
 
 static void place_temp_tag(lv_obj_t *tag, int px, int py, const char *text)

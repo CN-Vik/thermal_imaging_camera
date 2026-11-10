@@ -1551,13 +1551,28 @@ if (读到 blob && magic 对 && version 对) {
 `_gen_fonts.py` 为 ZH/JA/KO/RU 各生成一套 16 px、4 bpp 的字体 **子集**：
 
 ```python
+# 换字体只改这一段（家族 + 字重），再重新运行本脚本 + 重新编译
+UI_FONT_FAMILY = "NotoSansSC"   # "NotoSansSC"(思源黑体) / "MicrosoftYaHei"(微软雅黑)
+UI_FONT_WEIGHT = "Regular"      # "Regular" / "Medium" / "Bold"
+UI_FONT_SIZE   = 16
+
 FONT_SPECS = {
-    "ZH": ("C:/Windows/Fonts/simsun.ttc",   0, 16),
-    "JA": ("C:/Windows/Fonts/msgothic.ttc", 0, 16),
-    "KO": ("C:/Windows/Fonts/malgun.ttf",   0, 16),
-    "RU": ("C:/Windows/Fonts/arial.ttf",    0, 16),
+    "ZH": ("C:/Windows/Fonts/Noto Sans SC (TrueType).otf", 0, 16),
+    "JA": ("C:/Windows/Fonts/msgothic.ttc",                0, 16),
+    "KO": ("C:/Windows/Fonts/malgun.ttf",                  0, 16),
+    "RU": ("C:/Windows/Fonts/segoeui.ttf",                 0, 16),
 }
 ```
+
+> 历史：ZH 原本用 `simsun.ttc`（宋体，衬线印刷体），16 px 小屏上笔画细、发虚，
+> 与主流热像仪 UI 的现代无衬线风格不符，已换成**思源黑体**。
+> RU 由 Arial 换成 Segoe UI，观感更统一。Noto Sans SC 为 OFL 授权，可商用。
+> 字体是**编译期转成位图烧进固件**的，设备不需要装字体。
+
+**行高归一化**：CJK 字体的 hhea 行高在 16 px 下会到 24 px（SimSun 只有 17 px），
+直接用会让底部 HUD 卡片里的两行文字溢出 44 px 高度。脚本会按字形实际墨迹范围
+（`box_h + ofs_y` / `ofs_y`）收紧 `line_height` / `base_line`，保证墨迹不被裁切。
+
 包含的字符 = ASCII 0x20~0x7E + `STRINGS`/`LANG_NAMES` 里出现过的所有非 ASCII 字符。
 
 **结论**：

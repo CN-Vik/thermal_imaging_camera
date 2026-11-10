@@ -84,11 +84,41 @@ STRINGS = {
 LANG_NAMES = {"ZH": "中文", "EN": "English", "RU": "Русский", "JA": "日本語", "KO": "한국어"}
 
 # fonts to generate: lang -> (ttf path, index, size)
+# ---------------------------------------------------------------------------
+# UI 字体家族 —— 换字体只改这一段，然后重新运行本脚本 + 重新编译：
+#   "NotoSansSC"     思源黑体 / Google Noto Sans SC（现代无衬线，设备 UI 首选）
+#   "MicrosoftYaHei" 微软雅黑（Windows 桌面观感）
+# 原配置 simsun.ttc 是宋体（衬线印刷体），16px 小屏上笔画细、发虚，
+# 与主流热像仪 UI 的现代无衬线风格不符。
+# ---------------------------------------------------------------------------
+UI_FONT_FAMILY = "NotoSansSC"
+UI_FONT_WEIGHT = "Regular"     # "Regular" / "Medium" / "Bold"
+UI_FONT_SIZE   = 16
+
+FONT_FAMILY_FILES = {
+    # family: {weight: (ttf path, face index)}
+    "NotoSansSC": {
+        "Regular": (os.path.join(FONTS, "Noto Sans SC (TrueType).otf"), 0),
+        "Medium":  (os.path.join(FONTS, "Noto Sans SC Medium (TrueType).otf"), 0),
+        "Bold":    (os.path.join(FONTS, "Noto Sans SC Bold (TrueType).otf"), 0),
+    },
+    "MicrosoftYaHei": {
+        "Regular": (os.path.join(FONTS, "msyh.ttc"), 0),
+        "Medium":  (os.path.join(FONTS, "msyh.ttc"), 0),
+        "Bold":    (os.path.join(FONTS, "msyhbd.ttc"), 0),
+    },
+}
+
+def ui_font_face():
+    fam = FONT_FAMILY_FILES[UI_FONT_FAMILY]
+    return fam.get(UI_FONT_WEIGHT, fam["Regular"])
+
 FONT_SPECS = {
-    "ZH": (os.path.join(FONTS, "simsun.ttc"), 0, 16),
-    "JA": (os.path.join(FONTS, "msgothic.ttc"), 0, 16),
-    "KO": (os.path.join(FONTS, "malgun.ttf"), 0, 16),
-    "RU": (os.path.join(FONTS, "arial.ttf"), 0, 16),
+    "ZH": (*ui_font_face(), UI_FONT_SIZE),
+    "JA": (os.path.join(FONTS, "msgothic.ttc"), 0, UI_FONT_SIZE),
+    "KO": (os.path.join(FONTS, "malgun.ttf"), 0, UI_FONT_SIZE),
+    # 俄文用 Segoe UI（Windows 现代 UI 字体），比 Arial 更接近设备界面观感
+    "RU": (os.path.join(FONTS, "segoeui.ttf"), 0, UI_FONT_SIZE),
 }
 
 def collect_chars(lang):
@@ -175,6 +205,18 @@ def gen_font(lang):
     ascii_start_id = 1
     script_start_id = 1 + len(ascii_chars)  # = 96
 
+    # ---- 行高归一化 ----
+    # CJK 字体的 hhea 行高（ascent+descent）在 16px 下可达 24px，而原来的
+    # SimSun 只有 17px。若直接沿用，底部 HUD 卡片里两行文字会溢出 44px 高度。
+    # 这里按字形实际墨迹范围收紧 line_height / base_line，保证不裁切任何笔画。
+    # LVGL 约定：墨迹顶端高于基线 = box_h + ofs_y，墨迹底端高于基线 = ofs_y。
+    ink_tops    = [g["box_h"] + g["ofs_y"] for g in glyphs if g["box_h"] > 0]
+    ink_bottoms = [g["ofs_y"] for g in glyphs if g["box_h"] > 0]
+    top_max = max(ink_tops) if ink_tops else ascent
+    bot_min = min(ink_bottoms) if ink_bottoms else 0   # 负数 = 基线以下的下伸部
+    line_height_final = top_max - bot_min
+    base_line_final   = -bot_min
+
     # script cmap
     script_cps = [ord(ch) for ch in script_chars]
     script_unicode_list = []
@@ -240,8 +282,8 @@ def gen_font(lang):
     L.append("const lv_font_t %s = {" % name)
     L.append("    .get_glyph_dsc = lv_font_get_glyph_dsc_fmt_txt,")
     L.append("    .get_glyph_bitmap = lv_font_get_bitmap_fmt_txt,")
-    L.append("    .line_height = %d," % (ascent + descent))
-    L.append("    .base_line = %d," % descent)
+    L.append("    .line_height = %d," % line_height_final)
+    L.append("    .base_line = %d," % base_line_final)
     L.append("    .subpx = LV_FONT_SUBPX_NONE,")
     L.append("    .underline_position = -1,")
     L.append("    .underline_thickness = 1,")
