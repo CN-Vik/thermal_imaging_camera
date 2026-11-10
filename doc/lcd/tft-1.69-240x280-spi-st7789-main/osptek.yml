@@ -1,0 +1,22 @@
+id: tft-1.69-240x280-spi-st7789
+category: displays
+
+size: "1.69"
+panel: tft
+resolution: 240x280
+interface: [spi]
+shape: rect
+
+versions:
+  - id: YDP169H001-V3
+    driver: ST7789V3
+    touch: none
+    note: silicon is ST7789V3
+  - id: YDP169HB001-P8
+    driver: ST7789V3
+    touch: none
+    note: Panel part is YDP169H001-V3; silicon is ST7789V3
+  - id: YDP169HT006-V1
+    driver: ST7789P3
+    touch: CST816
+    note: silicon docs use ST7789P3

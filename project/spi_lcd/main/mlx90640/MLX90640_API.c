@@ -164,7 +164,11 @@ int MLX90640_GetFrameData(uint8_t slaveAddr, uint16_t *frameData)
         dataReady = MLX90640_GET_DATA_READY(statusRegister);
 
         if (dataReady == 0) {
-            vTaskDelay(pdMS_TO_TICKS(5)); // 未就绪时让任务休眠 5ms，把 CPU 完全让给 LVGL
+            /* 降发热优化：未就绪时休眠 20ms（原来 5ms）。
+             * 16Hz 下相邻子页间隔约 62.5ms，20ms 轮询只多约 15ms 延迟，
+             * 但每帧状态查询次数从 ~12 次降到 ~3 次，且更长的休眠窗口让
+             * CPU 能进入 light sleep，明显降低功耗与发热。 */
+            vTaskDelay(pdMS_TO_TICKS(20));
         }
     }
 

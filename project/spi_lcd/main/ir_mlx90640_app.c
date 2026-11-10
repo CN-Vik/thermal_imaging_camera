@@ -8,41 +8,163 @@
 #include "esp_timer.h"
 #include "driver/i2c_master.h"
 #include "esp_heap_caps.h"
+#include "nvs.h"
 #include "MLX90640_I2C_Driver.h"
 #include "MLX90640_API.h"
 #include "ir_mlx90640_app.h"
+#include "ir_settings_ui.h"
+#include "lang.h"
 
 static const char *TAG = "mlx_app";
 
+/* 本机安装方向：上下方向保持现状，只强制左右翻转。
+ * 若以后传感器与屏幕的安装方向改变，再将其改为 0。 */
+#define IR_FORCE_HORIZONTAL_MIRROR  1
+
+static inline bool ir_horizontal_mirror_enabled(void)
+{
+    return (IR_FORCE_HORIZONTAL_MIRROR != 0);
+}
+
 TaskHandle_t ir_task_Handle = NULL;
-static float emissivity = 0.95f;
+
+#define IR_SETTINGS_NVS_NAMESPACE "ir_settings"
+#define IR_SETTINGS_NVS_KEY       "app"
+#define IR_SETTINGS_MAGIC         0x49525354U
+#define IR_SETTINGS_VERSION       3U
+
+typedef struct {
+    uint32_t magic;
+    uint32_t version;
+    ir_app_settings_t settings;
+} ir_settings_nvs_blob_t;
+
+static const ir_app_settings_t s_default_settings = {
+    .color_mode = IR_COLOR_IRONBOW,
+    .color_reverse = false,
+    .label_coldest = true,
+    .label_hottest = true,
+    .label_fixture = false,
+    .fixture_px_x = MLX_INTERP_W / 2,
+    .fixture_px_y = MLX_INTERP_H / 2,
+    .rotate = IR_ROT_0,
+    .mirror_vertical = false,
+    .mirror_horizontal = false,
+    .temp_scale = IR_SCALE_CELSIUS,
+    .brightness = 50,
+    .auto_sleep_min = 30,
+    .filter_mode = IR_FILTER_BSPLINE,
+    .emissivity = 0.95f,
+    .gamma = 1.50f,
+    .temperature_offset_c = 0.0f,
+    .chart_source = IR_CHART_SRC_CENTER,
+};
+
+ir_app_settings_t g_ir_settings = {
+    .color_mode = IR_COLOR_IRONBOW,
+    .color_reverse = false,
+    .label_coldest = true,
+    .label_hottest = true,
+    .label_fixture = false,
+    .fixture_px_x = MLX_INTERP_W / 2,
+    .fixture_px_y = MLX_INTERP_H / 2,
+    .rotate = IR_ROT_0,
+    .mirror_vertical = false,
+    .mirror_horizontal = false,
+    .temp_scale = IR_SCALE_CELSIUS,
+    .brightness = 50,
+    .auto_sleep_min = 30,
+    .filter_mode = IR_FILTER_BSPLINE,
+    .emissivity = 0.95f,
+    .gamma = 1.50f,
+    .temperature_offset_c = 0.0f,
+    .chart_source = IR_CHART_SRC_CENTER,
+};
+
+/*
+ * 当前颜色模式：
+ * IR_COLOR_IRONBOW    铁红伪彩（默认）
+ * IR_COLOR_WHITE_HOT  白热
+ * IR_COLOR_BLACK_HOT  黑热
+ *
+ * 修改此处并重新编译、烧录即可切换模式。
+ */
+#define THERMAL_COLOR_MODE    IR_COLOR_IRONBOW
 
 /*
  * Thermal display tuning
- *
- * IMPORTANT:
- * The image color mapping is intentionally FIXED by default.
- * This prevents tiny MLX90640 measurement noise from being amplified
- * by a frame-by-frame min/max auto-range.
- *
- * For a normal indoor scene, 20~35C is a good starting window.
- * Change only these two values when you need another measurement range.
  */
-#define THERMAL_USE_AUTO_RANGE          0
-#define THERMAL_FIXED_MIN_C            20.0f
-#define THERMAL_FIXED_MAX_C            35.0f
+#define THERMAL_USE_AUTO_RANGE          1
+#define THERMAL_FIXED_MIN_C             24.0f
+#define THERMAL_FIXED_MAX_C             35.0f
 
-/* Very small changes are mostly sensor noise; smooth them strongly. */
-#define TEMP_FILTER_ALPHA_SMALL         0.12f
-#define TEMP_FILTER_ALPHA_MEDIUM        0.35f
-#define TEMP_FILTER_ALPHA_LARGE         0.80f
-#define TEMP_FILTER_MEDIUM_THRESHOLD     0.50f
-#define TEMP_FILTER_LARGE_THRESHOLD      1.50f
+/*
+ * 时域降噪参数（针对 16Hz 下 MLX90640 底噪优化）：
+ */
+#define TEMP_FILTER_ALPHA_MIN           0.04f
+#define TEMP_FILTER_ALPHA_MAX           0.85f
+#define TEMP_FILTER_NOISE_FLOOR_C       0.75f
+#define TEMP_FILTER_MOTION_SAT_C        2.20f
 
-/* If auto-range is enabled, it moves very slowly and keeps a wide margin. */
-#define AUTO_RANGE_MIN_SPAN_C            6.0f
-#define AUTO_RANGE_PADDING_C             1.0f
-#define AUTO_RANGE_ALPHA                 0.03f
+/* 3x3 孤立噪点抑制阈值：平坦背景区使用 0.58℃，手指边缘区自动切换为二阶连通保护 */
+#define THERMAL_OUTLIER_THRESH_C        0.58f
+
+/*
+ * 自动量程参数（完全保持原版参数）：
+ * - AUTO_RANGE_MIN_SPAN_C 设为 10.0℃，防止无热源时把 5℃ 的背景底噪拉伸成满屏花斑
+ * - AUTO_RANGE_HIGHLIGHT_HEADROOM_C 预留 1.3℃ 顶部余量，防止手掌核心区过曝惨白
+ */
+#define AUTO_RANGE_MIN_SPAN_C           10.0f
+#define AUTO_RANGE_LOW_PADDING_C        0.4f
+#define AUTO_RANGE_HIGHLIGHT_HEADROOM_C 1.3f
+#define AUTO_RANGE_ALPHA                0.04f
+#define THERMAL_PERCENTILE_LOW           5
+#define THERMAL_PERCENTILE_HIGH          95
+
+/* 降发热优化：
+ * - 画面被遮挡时不做采集/计算/送显，但**绝不改写传感器刷新率寄存器**：
+ *   运行中写 CTRL 会重启测量周期，退出菜单后第一帧要等很久才到，
+ *   表现为"屏幕卡一下然后出现错图"。
+ * - THERMAL_HIST_BINS：温度直方图分位数桶数（0.1℃ 分辨率，1~200℃），
+ *   以 O(n) 直方图替代每帧 qsort 768 个 float
+ */
+#define THERMAL_HIST_BINS                2000
+
+/* 退出遮挡后需要丢弃的新帧数：保证两个子场都是新数据再恢复显示 */
+#define IR_RESYNC_FRAMES                 2
+
+#define IR_SCREEN_W     280
+#define IR_SCREEN_H     240
+#define IR_TAG_GUESS_W  104
+#define IR_TAG_GUESS_H  26
+
+
+static void place_temp_tag(lv_obj_t *tag, int px, int py, const char *text)
+{
+    if (tag == NULL) return;
+
+    lv_label_set_text(tag, text);
+
+    int x = px + 8;
+    int y = py + 8;
+
+    /* 右边放不下就放左边，下边放不下就放上边 */
+    if (x + IR_TAG_GUESS_W > IR_SCREEN_W) x = px - IR_TAG_GUESS_W - 8;
+    if (y + IR_TAG_GUESS_H > IR_SCREEN_H) y = py - IR_TAG_GUESS_H - 8;
+
+    /* 最后再夹一次，保证不出屏 */
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x > IR_SCREEN_W - IR_TAG_GUESS_W) x = IR_SCREEN_W - IR_TAG_GUESS_W;
+    if (y > IR_SCREEN_H - IR_TAG_GUESS_H) y = IR_SCREEN_H - IR_TAG_GUESS_H;
+
+    lv_obj_set_pos(tag, x, y);
+}
+
+/* 当前旋转/镜像生效后的源图像缩放步进 */
+static uint32_t s_source_col_step_fp = 0;
+static uint32_t s_source_row_step_fp = 0;
+static bool s_transform_valid = false;
 
 static uint16_t *s_display_buf[2] = {NULL, NULL};
 static uint8_t  s_back_idx = 0;
@@ -56,12 +178,373 @@ lv_img_dsc_t s_thermal_img_dsc = {
     .data = NULL,
 };
 
-static uint16_t s_ironbow_lut[256];
 const float rate_hz_table[] = {0.5f, 1.0f, 2.0f, 4.0f, 8.0f, 16.0f, 32.0f, 64.0f};
 
-/* Pre-calculated fixed-point parameters for 1:1 center crop scaling. */
-static int32_t s_x_start_fp = 0;
-static uint32_t s_scale_fp = 0;
+/* 当前启用的颜色查找表 */
+static uint16_t s_color_lut[256];
+static ir_color_mode_t s_cur_color_mode = THERMAL_COLOR_MODE;
+
+/* 归一化温度快照（供拍照压缩存储），每帧刷新 */
+static uint8_t s_norm_snapshot[MLX_RAW_PIXELS];
+static float   s_snapshot_min_t = 0.0f;
+static float   s_snapshot_max_t = 0.0f;
+
+static float s_chart_buf[IR_CHART_HISTORY_LEN];
+static int s_chart_head = 0;
+static int s_chart_count = 0;
+static portMUX_TYPE s_chart_mux = portMUX_INITIALIZER_UNLOCKED;
+
+static inline float clampf_local(float v, float lo, float hi)
+{
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+static inline int clamp_int_local(int v, int lo, int hi)
+{
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+/*
+ * 1. 分场时域滤波 + 防趾蹼动态消交错
+ *    - 阶段 A：仅对本帧新测量的 subpage 像素做连续自适应 IIR 时域降噪
+ *    - 阶段 B：对未测量的另一半旧像素：
+ *              * 平坦背景区（正交极差 < 0.90℃）：用 [n1, n2] 区间抑制奇偶场棋盘格噪点
+ *              * 手指边缘与指根区（正交极差 >= 0.90℃）：改用 [n0, n3] 极值区间判断，
+ *                防止指根处（3 个高温邻居 + 1 个低温指缝邻居）把低温指缝拉成高温造成“趾蹼粘连”
+ */
+static void update_temporal_and_deinterlace(const float *raw_src, float *filt_state,
+                                            int w, int h, int subpage)
+{
+    const float inv_motion_span = 1.0f / (TEMP_FILTER_MOTION_SAT_C - TEMP_FILTER_NOISE_FLOOR_C);
+
+    // 阶段 A：仅更新当前 subpage 新采样的 384 个真实像素
+    for (int r = 0; r < h; r++) {
+        for (int c = 0; c < w; c++) {
+            if (((r + c) & 1) != subpage) {
+                continue;
+            }
+            int idx = r * w + c;
+            float raw_v = raw_src[idx];
+            float prev_v = filt_state[idx];
+
+            if (prev_v < 1.0f || !isfinite(prev_v)) {
+                filt_state[idx] = raw_v;
+                continue;
+            }
+
+            float d = fabsf(raw_v - prev_v);
+            float alpha;
+            if (d <= TEMP_FILTER_NOISE_FLOOR_C) {
+                alpha = TEMP_FILTER_ALPHA_MIN;
+            } else if (d >= TEMP_FILTER_MOTION_SAT_C) {
+                alpha = TEMP_FILTER_ALPHA_MAX;
+            } else {
+                float t = (d - TEMP_FILTER_NOISE_FLOOR_C) * inv_motion_span;
+                alpha = TEMP_FILTER_ALPHA_MIN + t * (TEMP_FILTER_ALPHA_MAX - TEMP_FILTER_ALPHA_MIN);
+            }
+
+            filt_state[idx] = prev_v + alpha * (raw_v - prev_v);
+        }
+    }
+
+    // 阶段 B：检查上一场的 384 个旧像素是否因热源运动而滞后
+    for (int r = 0; r < h; r++) {
+        int r_prev = (r > 0) ? (r - 1) : r;
+        int r_next = (r < h - 1) ? (r + 1) : r;
+
+        for (int c = 0; c < w; c++) {
+            if (((r + c) & 1) == subpage) {
+                continue;
+            }
+            int idx = r * w + c;
+            float val = filt_state[idx];
+
+            int c_prev = (c > 0) ? (c - 1) : c;
+            int c_next = (c < w - 1) ? (c + 1) : c;
+
+            // 这 4 个正交邻居全都是刚刚在阶段 A 更新完的【最新子场像素】
+            float n0 = filt_state[r_prev * w + c];
+            float n1 = filt_state[r_next * w + c];
+            float n2 = filt_state[r * w + c_prev];
+            float n3 = filt_state[r * w + c_next];
+
+            if (val < 1.0f || !isfinite(val)) {
+                filt_state[idx] = 0.25f * (n0 + n1 + n2 + n3);
+                continue;
+            }
+
+            // 快速排序网络: n0 <= n1 <= n2 <= n3
+            if (n0 > n1) { float t = n0; n0 = n1; n1 = t; }
+            if (n2 > n3) { float t = n2; n2 = n3; n3 = t; }
+            if (n0 > n2) { float t = n0; n0 = n2; n2 = t; }
+            if (n1 > n3) { float t = n1; n1 = n3; n3 = t; }
+            if (n1 > n2) { float t = n1; n1 = n2; n2 = t; }
+
+            float ortho_med = 0.5f * (n1 + n2);
+            float ortho_span = n3 - n0;
+
+            // 关键区分：
+            // - 若正交 4 邻居存在明显温差（ortho_span >= 0.90℃，如指根夹角或手指边缘），
+            //   使用外部极值 [n0, n3] 作为越界基准，只要有 1 个方向连着低温指缝 (n0)，就绝不把指缝拉成高温！
+            // - 若正交 4 邻居平坦（ortho_span < 0.90℃，如背景区），使用内部区间 [n1, n2] 消除奇偶噪点。
+            float lo_ref = (ortho_span >= 0.90f) ? n0 : n1;
+            float hi_ref = (ortho_span >= 0.90f) ? n3 : n2;
+
+            float out_of_bounds = 0.0f;
+            if (val < lo_ref) {
+                out_of_bounds = lo_ref - val;
+            } else if (val > hi_ref) {
+                out_of_bounds = val - hi_ref;
+            }
+
+            if (out_of_bounds > 0.50f) {
+                float m_weight = clampf_local((out_of_bounds - 0.50f) * 0.65f, 0.25f, 0.90f);
+                filt_state[idx] = val + m_weight * (ortho_med - val);
+            }
+        }
+    }
+}
+
+/*
+ * 2. 3x3 鲁棒中值异常点抑制（带指缝/指尖连通性保护）
+ *    - 在平坦区（v[n-2] - v[1] < 1.5℃）：与中位数 v[n/2] 比较，积极滤除背景噪点
+ *    - 在手指/指缝结构区（v[n-2] - v[1] >= 1.5℃）：1 像素宽的指缝在 3x3 窗口内只有 2~3 个低温点，
+ *      中位数 v[4] 必然是两侧的高温手指！此时改为与 [v[1], v[n-2]] 比较，
+ *      确保只要指缝或指尖有至少 2 个像素相连，就绝不会被中值滤波填平或削断。
+ */
+static void spatial_median_outlier_filter(const float *src, float *dst, int w, int h)
+{
+    for (int r = 0; r < h; r++) {
+        for (int c = 0; c < w; c++) {
+            float v[9];
+            int n = 0;
+
+            for (int dy = -1; dy <= 1; dy++) {
+                int rr = r + dy;
+                if (rr < 0) rr = 0;
+                if (rr >= h) rr = h - 1;
+
+                for (int dx = -1; dx <= 1; dx++) {
+                    int cc = c + dx;
+                    if (cc < 0) cc = 0;
+                    if (cc >= w) cc = w - 1;
+
+                    float t = src[rr * w + cc];
+                    if (isfinite(t) && t > 1.0f && t < 200.0f) {
+                        v[n++] = t;
+                    }
+                }
+            }
+
+            int idx = r * w + c;
+            float center = src[idx];
+            if (!isfinite(center) || center <= 1.0f || center >= 200.0f || n < 5) {
+                dst[idx] = center;
+                continue;
+            }
+
+            // 9 个以内元素，插入排序开销很小。
+            for (int i = 1; i < n; i++) {
+                float key = v[i];
+                int j = i - 1;
+                while (j >= 0 && v[j] > key) {
+                    v[j + 1] = v[j];
+                    j--;
+                }
+                v[j + 1] = key;
+            }
+
+            float median = v[n / 2];
+            float second_low  = v[1];
+            float second_high = v[n - 2];
+            float struct_span = second_high - second_low;
+
+            if (struct_span < 1.50f) {
+                // 平坦背景或手心内部：使用中位数强力滤除孤立噪点
+                float diff = fabsf(center - median);
+                if (diff > THERMAL_OUTLIER_THRESH_C) {
+                    float strength = clampf_local(
+                        (diff - THERMAL_OUTLIER_THRESH_C) / 1.1f,
+                        0.15f, 0.78f);
+                    dst[idx] = center + strength * (median - center);
+                } else {
+                    dst[idx] = center;
+                }
+            } else {
+                // 手指边缘、指尖或指缝区：仅当像素孤立超出次高/次低范围 [v[1], v[n-2]] 时才修正，
+                // 彻底杜绝 3x3 中位数把低温指缝拉向高温手指造成“趾蹼”！
+                if (center > second_high + 0.80f) {
+                    dst[idx] = second_high + 0.35f * (center - second_high);
+                } else if (center < second_low - 0.80f) {
+                    dst[idx] = second_low - 0.35f * (second_low - center);
+                } else {
+                    dst[idx] = center;
+                }
+            }
+        }
+    }
+}
+
+/*
+ * 3. 防指缝漏热的 3x3 双边保边平滑滤波
+ *    - 平坦区消除固定图案噪声 (FPN) 与奇偶微差
+ *    - 非对称防漏热保护：当邻居比中心像素更热（例如两侧手指高于中间指缝）时，
+ *      将截断阈值收紧至 0.65℃，严防两侧高温手指向中间低温指缝扩散热量导致手指粘连
+ */
+static void spatial_bilateral_denoise(const float *src, float *dst, int w, int h)
+{
+    const float edge_thresh_flat = 1.65f;
+    const float edge_thresh_hot_bleed = 0.65f; // 阻止高温邻居把低温指缝拉高
+
+    for (int r = 0; r < h; r++) {
+        int r_prev = (r > 0) ? (r - 1) : r;
+        int r_next = (r < h - 1) ? (r + 1) : r;
+
+        for (int c = 0; c < w; c++) {
+            int c_prev = (c > 0) ? (c - 1) : c;
+            int c_next = (c < w - 1) ? (c + 1) : c;
+
+            float center = src[r * w + c];
+
+            // 正交 4 邻域
+            float ortho[4] = {
+                src[r_prev * w + c],
+                src[r_next * w + c],
+                src[r * w + c_prev],
+                src[r * w + c_next]
+            };
+
+            // 对角 4 邻域
+            float diag[4] = {
+                src[r_prev * w + c_prev],
+                src[r_prev * w + c_next],
+                src[r_next * w + c_prev],
+                src[r_next * w + c_next]
+            };
+
+            // 计算正交邻域极差，判断当前是否处于平坦区
+            float o_min = ortho[0], o_max = ortho[0];
+            for (int i = 1; i < 4; i++) {
+                if (ortho[i] < o_min) o_min = ortho[i];
+                if (ortho[i] > o_max) o_max = ortho[i];
+            }
+            float ortho_span = o_max - o_min;
+
+            // 仅在非边缘/非指缝的平坦区域（ortho_span < 1.0℃）消除中心点与正交邻域的静态奇偶微差
+            if (ortho_span < 1.0f) {
+                float ortho_avg = 0.25f * (ortho[0] + ortho[1] + ortho[2] + ortho[3]);
+                if (fabsf(center - ortho_avg) < 0.80f) {
+                    center = 0.65f * center + 0.35f * ortho_avg;
+                }
+            }
+
+            float sum_smooth = center * 4.0f;
+            float w_total = 4.0f;
+
+            for (int i = 0; i < 4; i++) {
+                // 正交邻居：如果邻居比中心点热且处于有梯度的区域（如手指高于指缝），使用 0.65℃ 严苛阈值阻断漏热
+                float diff_o = ortho[i] - center;
+                float d_o = fabsf(diff_o);
+                float thresh_o = (diff_o > 0.0f && ortho_span >= 0.90f)
+                                 ? edge_thresh_hot_bleed
+                                 : edge_thresh_flat;
+                if (d_o < thresh_o) {
+                    float t = 1.0f - (d_o / thresh_o);
+                    float w_o = 2.0f * t * t;
+                    sum_smooth += ortho[i] * w_o;
+                    w_total += w_o;
+                }
+
+                // 对角邻居：同样阻止高温对角像素向低温指缝漏热
+                float diff_d = diag[i] - center;
+                float d_d = fabsf(diff_d);
+                float thresh_d = (diff_d > 0.0f && ortho_span >= 0.90f)
+                                 ? edge_thresh_hot_bleed
+                                 : edge_thresh_flat;
+                if (d_d < thresh_d) {
+                    float t = 1.0f - (d_d / thresh_d);
+                    float w_d = 1.0f * t * t;
+                    sum_smooth += diag[i] * w_d;
+                    w_total += w_d;
+                }
+            }
+
+            dst[r * w + c] = sum_smooth / w_total;
+        }
+    }
+}
+
+static void spatial_gaussian_denoise(const float *src, float *dst, int w, int h)
+{
+    static const float kernel[3][3] = {
+        {1.0f, 2.0f, 1.0f},
+        {2.0f, 4.0f, 2.0f},
+        {1.0f, 2.0f, 1.0f},
+    };
+
+    for (int r = 0; r < h; r++) {
+        for (int c = 0; c < w; c++) {
+            float sum = 0.0f;
+            float weight_sum = 0.0f;
+            float center = src[r * w + c];
+
+            for (int dy = -1; dy <= 1; dy++) {
+                int rr = r + dy;
+                if (rr < 0) rr = 0;
+                if (rr >= h) rr = h - 1;
+
+                for (int dx = -1; dx <= 1; dx++) {
+                    int cc = c + dx;
+                    if (cc < 0) cc = 0;
+                    if (cc >= w) cc = w - 1;
+
+                    float value = src[rr * w + cc];
+                    if (!isfinite(value) || value <= 1.0f || value >= 200.0f) {
+                        continue;
+                    }
+
+                    /* 同样加入非对称防漏热保护，防止高斯模式把高温手指扩散到低温指缝 */
+                    float diff = value - center;
+                    float thresh = (diff > 0.0f) ? 0.65f : 1.65f;
+                    float weight = kernel[dy + 1][dx + 1];
+                    if (fabsf(diff) > thresh) {
+                        weight *= 0.05f;
+                    }
+                    sum += value * weight;
+                    weight_sum += weight;
+                }
+            }
+
+            dst[r * w + c] = (weight_sum > 0.0f) ? (sum / weight_sum) : center;
+        }
+    }
+}
+
+static void apply_spatial_filter(const float *filtered, const float *median,
+                                 float *dst, int mode)
+{
+    switch (mode) {
+    case IR_FILTER_OFF:
+        memcpy(dst, filtered, MLX_RAW_PIXELS * sizeof(float));
+        break;
+    case IR_FILTER_MEDIAN:
+        memcpy(dst, median, MLX_RAW_PIXELS * sizeof(float));
+        break;
+    case IR_FILTER_GAUSSIAN:
+        spatial_gaussian_denoise(median, dst, MLX_RAW_W, MLX_RAW_H);
+        break;
+    case IR_FILTER_BILATERAL:
+    case IR_FILTER_BSPLINE:
+    default:
+        /* 始终基于 3x3 鲁棒中值滤波后的 median 进行双边保边滤波，与原版流水线完全一致 */
+        spatial_bilateral_denoise(median, dst, MLX_RAW_W, MLX_RAW_H);
+        break;
+    }
+}
 
 esp_err_t ir_camera_app_init(void)
 {
@@ -85,118 +568,453 @@ esp_err_t ir_camera_app_init(void)
         s_display_buf[1] = s_display_buf[0];
     }
 
-    s_scale_fp = ((MLX_RAW_H - 1) << 16) / (MLX_INTERP_H - 1);
-    s_x_start_fp = ((MLX_RAW_W - 1) << 15)
-                 - (int32_t)(((MLX_INTERP_W - 1) * s_scale_fp) / 2);
+    memset(s_display_buf[0], 0, buf_size);
+    if (s_display_buf[1] != s_display_buf[0]) {
+        memset(s_display_buf[1], 0, buf_size);
+    }
 
+    ir_camera_update_transform();
     s_thermal_img_dsc.data = (const uint8_t *)s_display_buf[0];
     return ESP_OK;
 }
 
-static void init_ironbow_lut(void)
+/*
+ * 初始化热成像颜色查找表（直接复用 ir_color_modes.c 的颜色配置逻辑）
+ */
+static void init_thermal_color_lut(ir_color_mode_t mode)
 {
-    for (int i = 0; i < 256; i++) {
-        float norm = (float)i / 255.0f;
-        uint8_t r = 0, g = 0, b = 0;
-
-        if (norm < 0.25f) {
-            float t = norm * 4.0f;
-            r = (uint8_t)(t * 40.0f);
-            g = 0;
-            b = (uint8_t)(t * 160.0f);
-        } else if (norm < 0.50f) {
-            float t = (norm - 0.25f) * 4.0f;
-            r = (uint8_t)(40.0f + t * 180.0f);
-            g = 0;
-            b = (uint8_t)(160.0f - t * 100.0f);
-        } else if (norm < 0.75f) {
-            float t = (norm - 0.50f) * 4.0f;
-            r = 255;
-            g = (uint8_t)(t * 180.0f);
-            b = (uint8_t)(60.0f - t * 60.0f);
-        } else {
-            float t = (norm - 0.75f) * 4.0f;
-            r = 255;
-            g = (uint8_t)(180.0f + t * 75.0f);
-            b = (uint8_t)(t * 255.0f);
+    s_cur_color_mode = mode;
+    ir_color_generate_lut(mode, s_color_lut);
+    if (g_ir_settings.color_reverse) {
+        for (int i = 0; i < 128; i++) {
+            uint16_t tmp = s_color_lut[i];
+            s_color_lut[i] = s_color_lut[255 - i];
+            s_color_lut[255 - i] = tmp;
         }
-
-        s_ironbow_lut[i] = lv_color_make(r, g, b).full;
     }
+}
+
+/**
+ * @brief 配置IR颜色模式
+ * 
+ * @param mode 
+ */
+void ir_camera_set_color_mode(ir_color_mode_t mode)
+{
+    if (mode >= IR_COLOR_MODE_MAX) return;
+    g_ir_settings.color_mode = mode;
+    init_thermal_color_lut(mode);
+}
+
+ir_color_mode_t ir_camera_get_color_mode(void)
+{
+    return s_cur_color_mode;
+}
+
+static void settings_clamp_to_valid_ranges(void)
+{
+    if (g_ir_settings.color_mode >= IR_COLOR_MODE_MAX) {
+        g_ir_settings.color_mode = IR_COLOR_IRONBOW;
+    }
+    if (g_ir_settings.rotate >= IR_ROT_MAX) {
+        g_ir_settings.rotate = IR_ROT_0;
+    }
+    if (g_ir_settings.temp_scale >= IR_SCALE_MAX) {
+        g_ir_settings.temp_scale = IR_SCALE_CELSIUS;
+    }
+    if (g_ir_settings.filter_mode >= IR_FILTER_MAX) {
+        g_ir_settings.filter_mode = IR_FILTER_BSPLINE;
+    }
+    if (g_ir_settings.chart_source >= IR_CHART_SRC_COUNT) {
+        g_ir_settings.chart_source = IR_CHART_SRC_CENTER;
+    }
+
+    g_ir_settings.fixture_px_x = (g_ir_settings.fixture_px_x < 0)
+                               ? 0 : g_ir_settings.fixture_px_x;
+    g_ir_settings.fixture_px_y = (g_ir_settings.fixture_px_y < 0)
+                               ? 0 : g_ir_settings.fixture_px_y;
+    if (g_ir_settings.fixture_px_x >= MLX_INTERP_W) {
+        g_ir_settings.fixture_px_x = MLX_INTERP_W - 1;
+    }
+    if (g_ir_settings.fixture_px_y >= MLX_INTERP_H) {
+        g_ir_settings.fixture_px_y = MLX_INTERP_H - 1;
+    }
+
+    if (g_ir_settings.brightness < 5) g_ir_settings.brightness = 5;
+    if (g_ir_settings.brightness > 100) g_ir_settings.brightness = 100;
+    if (g_ir_settings.auto_sleep_min < 0) g_ir_settings.auto_sleep_min = 0;
+    if (g_ir_settings.auto_sleep_min > 9999) g_ir_settings.auto_sleep_min = 9999;
+
+    g_ir_settings.emissivity = clampf_local(g_ir_settings.emissivity, 0.10f, 1.00f);
+    g_ir_settings.gamma = clampf_local(g_ir_settings.gamma, 0.50f, 3.00f);
+    g_ir_settings.temperature_offset_c =
+        clampf_local(g_ir_settings.temperature_offset_c, -10.0f, 10.0f);
+}
+
+esp_err_t ir_camera_settings_load(void)
+{
+    g_ir_settings = s_default_settings;
+    bool need_save_defaults = false;
+    bool need_save_settings = false;
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(IR_SETTINGS_NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (err == ESP_OK) {
+        ir_settings_nvs_blob_t blob;
+        size_t size = sizeof(blob);
+        err = nvs_get_blob(handle, IR_SETTINGS_NVS_KEY, &blob, &size);
+        nvs_close(handle);
+
+        if (err == ESP_OK && size == sizeof(blob) &&
+            blob.magic == IR_SETTINGS_MAGIC &&
+            (blob.version == IR_SETTINGS_VERSION || blob.version == 2U)) {
+            g_ir_settings = blob.settings;
+            /* 兼容上一版 v2 配置：保留用户其他设置，只升级方向字段和版本号。 */
+            if (blob.version != IR_SETTINGS_VERSION) {
+                need_save_settings = true;
+            }
+        } else {
+            /* 版本号升级或首次无数据时，使用最新默认配置并覆写 NVS */
+            need_save_defaults = true;
+            err = ESP_OK;
+        }
+    } else if (err == ESP_ERR_NVS_NOT_FOUND) {
+        need_save_defaults = true;
+        err = ESP_OK;
+    }
+
+    /* 固定本机热像左右方向，防止 NVS 中旧值或设置页旧值覆盖。 */
+    if (g_ir_settings.mirror_horizontal != ir_horizontal_mirror_enabled()) {
+        need_save_settings = true;
+    }
+    g_ir_settings.mirror_horizontal = ir_horizontal_mirror_enabled();
+    ESP_LOGI(TAG, "Display transform: rot=%d mirror_x=%d mirror_y=%d (horizontal mirror forced)",
+             (int)g_ir_settings.rotate,
+             (int)g_ir_settings.mirror_horizontal,
+             (int)g_ir_settings.mirror_vertical);
+
+    settings_clamp_to_valid_ranges();
+    ir_camera_update_transform();
+    ir_camera_set_color_mode(g_ir_settings.color_mode);
+
+    if (need_save_defaults || need_save_settings) {
+        ir_camera_settings_save();
+    }
+    return err;
+}
+
+esp_err_t ir_camera_settings_save(void)
+{
+    g_ir_settings.mirror_horizontal = ir_horizontal_mirror_enabled();
+    settings_clamp_to_valid_ranges();
+
+    ir_settings_nvs_blob_t blob = {
+        .magic = IR_SETTINGS_MAGIC,
+        .version = IR_SETTINGS_VERSION,
+        .settings = g_ir_settings,
+    };
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(IR_SETTINGS_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) return err;
+
+    err = nvs_set_blob(handle, IR_SETTINGS_NVS_KEY, &blob, sizeof(blob));
+    if (err == ESP_OK) err = nvs_commit(handle);
+    nvs_close(handle);
+    return err;
+}
+
+void ir_camera_settings_reset(void)
+{
+    g_ir_settings = s_default_settings;
+    ir_camera_settings_save();
+    ir_camera_update_transform();
+    ir_camera_set_color_mode(g_ir_settings.color_mode);
+    ir_camera_chart_clear();
+}
+
+/* 获取当前正在显示的热成像帧（280x240 RGB565），未就绪时返回 NULL */
+const uint8_t *ir_camera_get_frame(void)
+{
+    return s_thermal_img_dsc.data;
+}
+
+/* 复制当前归一化温度矩阵（32x24，每像素 0-255），供拍照压缩存储 */
+void ir_camera_get_norm_matrix(uint8_t *out)
+{
+    if (out) memcpy(out, s_norm_snapshot, sizeof(s_norm_snapshot));
+}
+
+/* 获取当前量程（供后续重归一化） */
+void ir_camera_get_snapshot_range(float *min_t, float *max_t)
+{
+    if (min_t) *min_t = s_snapshot_min_t;
+    if (max_t) *max_t = s_snapshot_max_t;
+}
+
+void ir_camera_update_transform(void)
+{
+    if (g_ir_settings.rotate == IR_ROT_90 || g_ir_settings.rotate == IR_ROT_270) {
+        s_source_col_step_fp =
+            ((uint32_t)(MLX_RAW_W - 1) << 16) / (uint32_t)(MLX_INTERP_H - 1);
+        s_source_row_step_fp =
+            ((uint32_t)(MLX_RAW_H - 1) << 16) / (uint32_t)(MLX_INTERP_W - 1);
+    } else {
+        s_source_col_step_fp =
+            ((uint32_t)(MLX_RAW_W - 1) << 16) / (uint32_t)(MLX_INTERP_W - 1);
+        s_source_row_step_fp =
+            ((uint32_t)(MLX_RAW_H - 1) << 16) / (uint32_t)(MLX_INTERP_H - 1);
+    }
+    s_transform_valid = true;
+}
+
+static inline void screen_xy_to_source_fp(int x, int y, int src_w, int src_h,
+                                          int dst_w, int dst_h,
+                                          uint32_t *col_fp, uint32_t *row_fp)
+{
+    int mx = ir_horizontal_mirror_enabled() ? (dst_w - 1 - x) : x;
+    int my = g_ir_settings.mirror_vertical ? (dst_h - 1 - y) : y;
+
+    switch (g_ir_settings.rotate) {
+    case IR_ROT_90:
+        *col_fp = (uint32_t)my * s_source_col_step_fp;
+        *row_fp = (uint32_t)(dst_w - 1 - mx) * s_source_row_step_fp;
+        break;
+    case IR_ROT_180:
+        *col_fp = (uint32_t)(dst_w - 1 - mx) * s_source_col_step_fp;
+        *row_fp = (uint32_t)(dst_h - 1 - my) * s_source_row_step_fp;
+        break;
+    case IR_ROT_270:
+        *col_fp = (uint32_t)(dst_h - 1 - my) * s_source_col_step_fp;
+        *row_fp = (uint32_t)mx * s_source_row_step_fp;
+        break;
+    case IR_ROT_0:
+    default:
+        *col_fp = (uint32_t)mx * s_source_col_step_fp;
+        *row_fp = (uint32_t)my * s_source_row_step_fp;
+        break;
+    }
+
+    if (*col_fp >= (uint32_t)(src_w - 1) << 16) {
+        *col_fp = (uint32_t)(src_w - 1) << 16;
+    }
+    if (*row_fp >= (uint32_t)(src_h - 1) << 16) {
+        *row_fp = (uint32_t)(src_h - 1) << 16;
+    }
+}
+
+static inline void raw_rc_to_screen_xy(int raw_r, int raw_c, int *px_x, int *px_y)
+{
+    int x;
+    int y;
+
+    switch (g_ir_settings.rotate) {
+    case IR_ROT_90:
+        x = (MLX_INTERP_W - 1) -
+            (raw_r * (MLX_INTERP_W - 1)) / (MLX_RAW_H - 1);
+        y = (raw_c * (MLX_INTERP_H - 1)) / (MLX_RAW_W - 1);
+        break;
+    case IR_ROT_180:
+        x = (MLX_INTERP_W - 1) -
+            (raw_c * (MLX_INTERP_W - 1)) / (MLX_RAW_W - 1);
+        y = (MLX_INTERP_H - 1) -
+            (raw_r * (MLX_INTERP_H - 1)) / (MLX_RAW_H - 1);
+        break;
+    case IR_ROT_270:
+        x = (raw_r * (MLX_INTERP_W - 1)) / (MLX_RAW_H - 1);
+        y = (MLX_INTERP_H - 1) -
+            (raw_c * (MLX_INTERP_H - 1)) / (MLX_RAW_W - 1);
+        break;
+    case IR_ROT_0:
+    default:
+        x = (raw_c * (MLX_INTERP_W - 1)) / (MLX_RAW_W - 1);
+        y = (raw_r * (MLX_INTERP_H - 1)) / (MLX_RAW_H - 1);
+        break;
+    }
+
+    if (ir_horizontal_mirror_enabled()) x = (MLX_INTERP_W - 1) - x;
+    if (g_ir_settings.mirror_vertical) y = (MLX_INTERP_H - 1) - y;
+
+    *px_x = clamp_int_local(x, 0, MLX_INTERP_W - 1);
+    *px_y = clamp_int_local(y, 0, MLX_INTERP_H - 1);
+}
+
+static inline int screen_xy_to_raw_idx(int px_x, int px_y)
+{
+    uint32_t col_fp;
+    uint32_t row_fp;
+
+    px_x = clamp_int_local(px_x, 0, MLX_INTERP_W - 1);
+    px_y = clamp_int_local(px_y, 0, MLX_INTERP_H - 1);
+    screen_xy_to_source_fp(px_x, px_y, MLX_RAW_W, MLX_RAW_H,
+                           MLX_INTERP_W, MLX_INTERP_H, &col_fp, &row_fp);
+
+    int raw_c = (int)(col_fp >> 16);
+    int raw_r = (int)(row_fp >> 16);
+    raw_c = clamp_int_local(raw_c, 0, MLX_RAW_W - 1);
+    raw_r = clamp_int_local(raw_r, 0, MLX_RAW_H - 1);
+    return raw_r * MLX_RAW_W + raw_c;
 }
 
 /*
- * Natural spatial filter.
- * Center 8, 4-neighbor 1.5, diagonal 0.5 => total weight 16.
+ * 全屏双线性插值（恢复原版外层行预计算优化，同时兼容 0/90/180/270 度旋转与镜像）
  */
-static void spatial_filter_natural(const float *src, float *dst, int w, int h)
-{
-    for (int r = 0; r < h; r++) {
-        int r_prev = (r > 0) ? (r - 1) : r;
-        int r_next = (r < h - 1) ? (r + 1) : r;
-
-        for (int c = 0; c < w; c++) {
-            /* Fixed boundary handling: never use c-1 when c==0,
-             * and never use c-1 as a fake right neighbor at the last column. */
-            int c_prev = (c > 0) ? (c - 1) : c;
-            int c_next = (c < w - 1) ? (c + 1) : c;
-
-            float sum = src[r * w + c] * 8.0f
-                      + (src[r_prev * w + c]
-                       + src[r_next * w + c]
-                       + src[r * w + c_prev]
-                       + src[r * w + c_next]) * 1.5f
-                      + (src[r_prev * w + c_prev]
-                       + src[r_prev * w + c_next]
-                       + src[r_next * w + c_prev]
-                       + src[r_next * w + c_next]) * 0.5f;
-
-            dst[r * w + c] = sum * (1.0f / 16.0f);
-        }
-    }
-}
-
 static void bilinear_scale_fullscreen_1to1(const uint8_t *src, int src_w, int src_h,
                                            uint16_t *dst, int dst_w, int dst_h,
                                            const uint16_t *lut)
 {
-    for (int y = 0; y < dst_h; y++) {
-        uint32_t y_fp = y * s_scale_fp;
-        int y0 = y_fp >> 16;
-        int y1 = (y0 < src_h - 1) ? (y0 + 1) : y0;
-        uint32_t y_diff = y_fp & 0xFFFF;
-        uint32_t y_diff_inv = 65536U - y_diff;
+    if (!s_transform_valid) ir_camera_update_transform();
 
-        const uint8_t *p_y0 = &src[y0 * src_w];
-        const uint8_t *p_y1 = &src[y1 * src_w];
-        uint16_t *dst_row = &dst[y * dst_w];
+    const ir_rotate_t rot = g_ir_settings.rotate;
+    const bool mirror_x = ir_horizontal_mirror_enabled();
+    const bool flip_x = (rot == IR_ROT_90 || rot == IR_ROT_180)
+                        ? !mirror_x
+                        : mirror_x;
+    const bool flip_y = (rot == IR_ROT_180 || rot == IR_ROT_270)
+                        ? !g_ir_settings.mirror_vertical
+                        : g_ir_settings.mirror_vertical;
 
-        int32_t x_fp = s_x_start_fp;
+    const uint32_t max_col_fp = (uint32_t)(src_w - 1) << 16;
+    const uint32_t max_row_fp = (uint32_t)(src_h - 1) << 16;
 
-        for (int x = 0; x < dst_w; x++) {
-            int x0 = x_fp >> 16;
-            int x1 = (x0 < src_w - 1) ? x0 + 1 : x0;
+    if (rot == IR_ROT_90 || rot == IR_ROT_270) {
+        for (int y = 0; y < dst_h; y++) {
+            int eff_y = flip_y ? (dst_h - 1 - y) : y;
+            uint32_t c_fp = (uint32_t)eff_y * s_source_col_step_fp;
+            if (c_fp > max_col_fp) c_fp = max_col_fp;
 
-            /* The current crop geometry keeps x0 inside the sensor width.
-             * Clamp defensively so an edge case can never read out of range. */
-            if (x0 < 0) x0 = 0;
-            if (x0 >= src_w) x0 = src_w - 1;
-            if (x1 < 0) x1 = 0;
-            if (x1 >= src_w) x1 = src_w - 1;
+            int c0 = c_fp >> 16;
+            int c1 = (c0 < src_w - 1) ? (c0 + 1) : c0;
+            uint32_t c_diff = c_fp & 0xFFFFU;
+            uint32_t c_diff_inv = 65536U - c_diff;
+            uint16_t *dst_row = &dst[y * dst_w];
 
-            uint32_t x_diff = x_fp & 0xFFFF;
-            uint32_t x_diff_inv = 65536U - x_diff;
+            for (int x = 0; x < dst_w; x++) {
+                int eff_x = flip_x ? (dst_w - 1 - x) : x;
+                uint32_t r_fp = (uint32_t)eff_x * s_source_row_step_fp;
+                if (r_fp > max_row_fp) r_fp = max_row_fp;
 
-            uint32_t top = (p_y0[x0] * x_diff_inv + p_y0[x1] * x_diff) >> 16;
-            uint32_t bot = (p_y1[x0] * x_diff_inv + p_y1[x1] * x_diff) >> 16;
+                int r0 = r_fp >> 16;
+                int r1 = (r0 < src_h - 1) ? (r0 + 1) : r0;
+                uint32_t r_diff = r_fp & 0xFFFFU;
+                uint32_t r_diff_inv = 65536U - r_diff;
 
-            uint32_t val = (top * y_diff_inv + bot * y_diff) >> 16;
-            if (val > 255U) val = 255U;
+                const uint8_t *p_r0 = &src[r0 * src_w];
+                const uint8_t *p_r1 = &src[r1 * src_w];
 
-            dst_row[x] = lut[val];
-            x_fp += s_scale_fp;
+                uint32_t row0 = (p_r0[c0] * c_diff_inv + p_r0[c1] * c_diff) >> 16;
+                uint32_t row1 = (p_r1[c0] * c_diff_inv + p_r1[c1] * c_diff) >> 16;
+                uint32_t val  = (row0 * r_diff_inv + row1 * r_diff) >> 16;
+                if (val > 255U) val = 255U;
+
+                dst_row[x] = lut[val];
+            }
+        }
+    } else {
+        for (int y = 0; y < dst_h; y++) {
+            int eff_y = flip_y ? (dst_h - 1 - y) : y;
+            uint32_t r_fp = (uint32_t)eff_y * s_source_row_step_fp;
+            if (r_fp > max_row_fp) r_fp = max_row_fp;
+
+            int r0 = r_fp >> 16;
+            int r1 = (r0 < src_h - 1) ? (r0 + 1) : r0;
+            uint32_t r_diff = r_fp & 0xFFFFU;
+            uint32_t r_diff_inv = 65536U - r_diff;
+
+            const uint8_t *p_r0 = &src[r0 * src_w];
+            const uint8_t *p_r1 = &src[r1 * src_w];
+            uint16_t *dst_row = &dst[y * dst_w];
+
+            for (int x = 0; x < dst_w; x++) {
+                int eff_x = flip_x ? (dst_w - 1 - x) : x;
+                uint32_t c_fp = (uint32_t)eff_x * s_source_col_step_fp;
+                if (c_fp > max_col_fp) c_fp = max_col_fp;
+
+                int c0 = c_fp >> 16;
+                int c1 = (c0 < src_w - 1) ? (c0 + 1) : c0;
+                uint32_t c_diff = c_fp & 0xFFFFU;
+                uint32_t c_diff_inv = 65536U - c_diff;
+
+                uint32_t top = (p_r0[c0] * c_diff_inv + p_r0[c1] * c_diff) >> 16;
+                uint32_t bot = (p_r1[c0] * c_diff_inv + p_r1[c1] * c_diff) >> 16;
+                uint32_t val = (top * r_diff_inv + bot * r_diff) >> 16;
+                if (val > 255U) val = 255U;
+
+                dst_row[x] = lut[val];
+            }
         }
     }
+}
+
+/* 把归一化矩阵渲染为 280x240 RGB565（用指定色彩模式） */
+void ir_camera_render_norm(const uint8_t *norm, ir_color_mode_t mode, uint16_t *dst)
+{
+    if (!norm || !dst) return;
+    uint16_t lut[256];
+    ir_color_generate_lut(mode, lut);
+    if (g_ir_settings.color_reverse) {
+        for (int i = 0; i < 128; i++) {
+            uint16_t tmp = lut[i];
+            lut[i] = lut[255 - i];
+            lut[255 - i] = tmp;
+        }
+    }
+    bilinear_scale_fullscreen_1to1(norm, MLX_RAW_W, MLX_RAW_H,
+                                   dst, MLX_INTERP_W, MLX_INTERP_H, lut);
+}
+
+float ir_camera_convert_temp(float temp_c, const char **unit_str)
+{
+    switch (g_ir_settings.temp_scale) {
+    case IR_SCALE_FAHRENHEIT:
+        if (unit_str) *unit_str = "F";
+        return temp_c * 1.8f + 32.0f;
+    case IR_SCALE_KELVIN:
+        if (unit_str) *unit_str = "K";
+        return temp_c + 273.15f;
+    case IR_SCALE_RANKINE:
+        if (unit_str) *unit_str = "R";
+        return (temp_c + 273.15f) * 1.8f;
+    case IR_SCALE_CELSIUS:
+    default:
+        if (unit_str) *unit_str = "C";
+        return temp_c;
+    }
+}
+
+void ir_camera_chart_clear(void)
+{
+    portENTER_CRITICAL(&s_chart_mux);
+    s_chart_head = 0;
+    s_chart_count = 0;
+    portEXIT_CRITICAL(&s_chart_mux);
+}
+
+static void ir_camera_chart_push(float temp_c)
+{
+    if (!isfinite(temp_c) || temp_c <= 1.0f || temp_c >= 200.0f) return;
+
+    portENTER_CRITICAL(&s_chart_mux);
+    s_chart_buf[s_chart_head] = temp_c;
+    s_chart_head = (s_chart_head + 1) % IR_CHART_HISTORY_LEN;
+    if (s_chart_count < IR_CHART_HISTORY_LEN) {
+        s_chart_count++;
+    }
+    portEXIT_CRITICAL(&s_chart_mux);
+}
+
+void ir_camera_chart_get_data(float *out_buf, int *out_count)
+{
+    portENTER_CRITICAL(&s_chart_mux);
+    int count = s_chart_count;
+    int first = (s_chart_head + IR_CHART_HISTORY_LEN - count) % IR_CHART_HISTORY_LEN;
+    if (out_count) *out_count = count;
+    if (out_buf) {
+        for (int i = 0; i < count; i++) {
+            out_buf[i] = s_chart_buf[(first + i) % IR_CHART_HISTORY_LEN];
+        }
+    }
+    portEXIT_CRITICAL(&s_chart_mux);
 }
 
 static inline void draw_diamond_marker(uint16_t *buf, int cx, int cy,
@@ -223,44 +1041,34 @@ static inline void draw_diamond_marker(uint16_t *buf, int cx, int cy,
     }
 }
 
-static inline float clampf_local(float v, float lo, float hi)
-{
-    if (v < lo) return lo;
-    if (v > hi) return hi;
-    return v;
-}
-
-/*
- * Convert temperature to an 8-bit color index.
- * Default mode is fixed range to prevent color breathing/flicker.
- */
 static void temperature_to_norm_u8(const float *src, uint8_t *dst,
                                    float smooth_min_t, float smooth_max_t)
 {
-    float map_min;
-    float map_max;
-
-#if THERMAL_USE_AUTO_RANGE
-    map_min = smooth_min_t;
-    map_max = smooth_max_t;
-#else
-    (void)smooth_min_t;
-    (void)smooth_max_t;
-    map_min = THERMAL_FIXED_MIN_C;
-    map_max = THERMAL_FIXED_MAX_C;
-#endif
+    float map_min = THERMAL_USE_AUTO_RANGE ? smooth_min_t : THERMAL_FIXED_MIN_C;
+    float map_max = THERMAL_USE_AUTO_RANGE ? smooth_max_t : THERMAL_FIXED_MAX_C;
 
     float delta = map_max - map_min;
-    if (delta < 1.0f) {
-        delta = 1.0f;
+    if (delta < 2.0f) {
+        delta = 2.0f;
     }
 
-    float range_inv = 255.0f / delta;
+    float range_inv = 1.0f / delta;
+    float gamma = clampf_local(g_ir_settings.gamma, 0.5f, 3.0f);
+    bool use_default_gamma = (fabsf(gamma - 1.5f) < 0.01f);
 
     for (int i = 0; i < MLX_RAW_PIXELS; i++) {
-        float val = (src[i] - map_min) * range_inv;
-        val = clampf_local(val, 0.0f, 255.0f);
-        dst[i] = (uint8_t)(val + 0.5f);
+        float norm = (src[i] - map_min) * range_inv;
+        norm = clampf_local(norm, 0.0f, 1.0f);
+
+        /*
+         * 恢复原版温和对比度曲线 (0.65 * norm^gamma + 0.35 * norm)：
+         * 默认 gamma=1.5 时使用快速 norm * sqrtf(norm)，与 origin_ir_mlx90640_app.c 完全一致；
+         * 既压低背景暗部噪点，又保留手掌高温区和边缘的细节层次。
+         */
+        float gamma_curve = use_default_gamma ? (norm * sqrtf(norm)) : powf(norm, gamma);
+        norm = 0.65f * gamma_curve + 0.35f * norm;
+
+        dst[i] = (uint8_t)(norm * 255.0f + 0.5f);
     }
 }
 
@@ -272,7 +1080,7 @@ void ir_camera_task_main(void *pvParameters)
     ESP_LOGI(TAG, "Thermal map: fixed range %.1fC ~ %.1fC, auto_range=%d",
              THERMAL_FIXED_MIN_C, THERMAL_FIXED_MAX_C, THERMAL_USE_AUTO_RANGE);
 
-    init_ironbow_lut();
+    init_thermal_color_lut(g_ir_settings.color_mode);
 
     MLX90640_I2CInit();
     MLX90640_SetRefreshRate(MLX90640_ADDR, RefreshRate);
@@ -280,36 +1088,17 @@ void ir_camera_task_main(void *pvParameters)
 
     uint16_t *ir_frame_data = (uint16_t *)calloc(834, sizeof(uint16_t));
     uint16_t *eerom_ir_data = (uint16_t *)calloc(832, sizeof(uint16_t));
-    float *ir_temp_data = (float *)calloc(MLX_RAW_PIXELS, sizeof(float));
+    float *raw_temp_matrix  = (float *)calloc(MLX_RAW_PIXELS, sizeof(float));
     paramsMLX90640 *mlx_params = (paramsMLX90640 *)calloc(1, sizeof(paramsMLX90640));
 
-    /* Two true subpage buffers.  A displayed frame is built only after both
-     * subpages have been received, instead of mixing a new half-frame with
-     * an older half-frame on every I2C read. */
-    float *subpage_temp[2] = {
-        (float *)calloc(MLX_RAW_PIXELS, sizeof(float)),
-        (float *)calloc(MLX_RAW_PIXELS, sizeof(float))
-    };
-
-    float *raw_full_matrix = (float *)calloc(MLX_RAW_PIXELS, sizeof(float));
     float *filtered_temp = (float *)calloc(MLX_RAW_PIXELS, sizeof(float));
-    float *spatial_temp = (float *)calloc(MLX_RAW_PIXELS, sizeof(float));
+    float *median_temp   = (float *)calloc(MLX_RAW_PIXELS, sizeof(float));
+    float *spatial_temp  = (float *)calloc(MLX_RAW_PIXELS, sizeof(float));
     uint8_t *norm_matrix = (uint8_t *)calloc(MLX_RAW_PIXELS, sizeof(uint8_t));
 
-    if (!ir_frame_data || !eerom_ir_data || !ir_temp_data || !mlx_params ||
-        !subpage_temp[0] || !subpage_temp[1] || !raw_full_matrix ||
-        !filtered_temp || !spatial_temp || !norm_matrix) {
+    if (!ir_frame_data || !eerom_ir_data || !raw_temp_matrix || !mlx_params ||
+        !filtered_temp || !median_temp || !spatial_temp || !norm_matrix) {
         ESP_LOGE(TAG, "Critical: calloc failed, Out of memory!");
-        free(ir_frame_data);
-        free(eerom_ir_data);
-        free(ir_temp_data);
-        free(mlx_params);
-        free(subpage_temp[0]);
-        free(subpage_temp[1]);
-        free(raw_full_matrix);
-        free(filtered_temp);
-        free(spatial_temp);
-        free(norm_matrix);
         vTaskDelete(NULL);
         return;
     }
@@ -319,161 +1108,145 @@ void ir_camera_task_main(void *pvParameters)
     free(eerom_ir_data);
     eerom_ir_data = NULL;
 
-    char text_info[96];
+    ESP_LOGI(TAG, "Warming up MLX90640 sensor...");
+    for (int i = 0; i < 4; i++) {
+        MLX90640_GetFrameData(MLX90640_ADDR, ir_frame_data);
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    char text_info[128];
     char text_fps[32];
-    char text_max_tag[16];
-    char text_min_tag[16];
+    char text_max_tag[32];
+    char text_min_tag[32];
+    char text_fix_tag[32];
 
     uint32_t frame_count = 0;
     float real_fps = 0.0f;
     int64_t last_time_us = esp_timer_get_time();
+    int64_t last_chart_us = 0;
 
     float smooth_min_t = THERMAL_FIXED_MIN_C;
     float smooth_max_t = THERMAL_FIXED_MAX_C;
+    float smooth_ta    = 25.0f;
+    bool ta_initialized = false;
     bool range_initialized = false;
 
-    bool subpage_ready[2] = {false, false};
+    bool subpage_init[2] = {false, false};
+
+    bool ui_was_blocked = false;
+    int  resync_left = 0;
 
     while (1) {
+        /* ============ 降发热优化：画面被遮挡时流水线停摆 ============
+         * 设置页/相册/调色板/照片查看/息屏都是全屏遮挡，热像图完全不可见，
+         * 此时完全不做采集/滤波/送显（曲线页除外，它还需要数据）。
+         *
+         * 注意：这里**不再**改写 MLX90640 刷新率寄存器。之前在遮挡时把传感器
+         * 切到 1Hz、退出时切回 16Hz，运行中写 CTRL 会重启传感器测量周期，
+         * 退出菜单后第一帧要等近 1 秒才到 —— 这就是"屏幕卡一下"的直接原因。
+         * 传感器保持在开机时设定的 16Hz（与原来一致，无运行时寄存器写入）。
+         */
+        bool ui_blocked = false;
+        bool chart_active = false;
+        /* UI 状态查询会读 LVGL 对象（菜单/相册面板可能被删除重建），
+         * 必须在 LVGL 互斥锁内进行，否则有读到已释放对象的风险。
+         * 拿不到锁时按"未遮挡"处理，保证热像仍然正常刷新。 */
+        if (example_lvgl_lock(50)) {
+            ui_blocked = ir_settings_ui_is_open() ||
+                         thermal_ui_view_blocking() ||
+                         ir_settings_ui_screen_sleeping();
+            chart_active = ir_settings_ui_chart_page_active();
+            example_lvgl_unlock();
+        }
+
+        if (ui_blocked) {
+            if (!chart_active) {
+                ui_was_blocked = true;
+                vTaskDelay(pdMS_TO_TICKS(100));
+                continue;
+            }
+        } else if (ui_was_blocked) {
+            /* 退出遮挡：遮挡期间 raw_temp_matrix 只留着旧的半边数据，
+             * 若直接显示会得到"一半旧一半新"的错图。
+             * 先清 data-ready 标志强制等新帧，再丢弃 IR_RESYNC_FRAMES 帧，
+             * 确保两个子场都是新数据后才恢复显示。 */
+            ui_was_blocked = false;
+            MLX90640_I2CWrite(MLX90640_ADDR, MLX90640_STATUS_REG,
+                              MLX90640_INIT_STATUS_VALUE);
+            resync_left = IR_RESYNC_FRAMES;
+        }
+
         int status = MLX90640_GetFrameData(MLX90640_ADDR, ir_frame_data);
 
         if (status >= 0) {
             int subpage = ir_frame_data[833];
-
             if (subpage < 0 || subpage > 1) {
                 vTaskDelay(pdMS_TO_TICKS(2));
                 continue;
             }
 
-            float ta = MLX90640_GetTa(ir_frame_data, mlx_params);
-            MLX90640_CalculateTo(ir_frame_data, mlx_params,
-                                 emissivity, ta - TA_SHIFT, ir_temp_data);
-            frame_count++;
-
-            /* ------------------------------------------------------------
-             * 1. Save only the currently refreshed physical subpage.
-             * ------------------------------------------------------------ */
-            for (int i = 0; i < MLX_RAW_PIXELS; i++) {
-                int r = i / MLX_RAW_W;
-                int c = i % MLX_RAW_W;
-
-                if (((r + c) & 1) == subpage) {
-                    float t = ir_temp_data[i];
-                    if (t > 0.0f && t < 300.0f && isfinite(t)) {
-                        subpage_temp[subpage][i] = t;
-                    }
-                }
+            float raw_ta = MLX90640_GetTa(ir_frame_data, mlx_params);
+            if (!ta_initialized || !isfinite(smooth_ta)) {
+                smooth_ta = raw_ta;
+                ta_initialized = true;
+            } else if (isfinite(raw_ta)) {
+                smooth_ta += 0.12f * (raw_ta - smooth_ta);
             }
 
-            subpage_ready[subpage] = true;
+            // 1. 官方原生计算：增量更新当前 subpage 的 384 个点
+            MLX90640_CalculateTo(ir_frame_data, mlx_params,
+                                 g_ir_settings.emissivity,
+                                 smooth_ta - TA_SHIFT, raw_temp_matrix);
 
-            /* Do not process/display a frame until both subpages are fresh. */
-            if (!(subpage_ready[0] && subpage_ready[1])) {
-                vTaskDelay(pdMS_TO_TICKS(1));
+            int mode = (ir_frame_data[832] & MLX90640_CTRL_MEAS_MODE_MASK) >> 5;
+            MLX90640_BadPixelsCorrection(mlx_params->brokenPixels, raw_temp_matrix, mode, mlx_params);
+            MLX90640_BadPixelsCorrection(mlx_params->outlierPixels, raw_temp_matrix, mode, mlx_params);
+
+            subpage_init[subpage] = true;
+            frame_count++;
+
+            if (resync_left > 0) {
+                /* 重新同步：丢弃前 IR_RESYNC_FRAMES 帧，让两个子场都刷新成新数据。
+                 * 丢弃期间不解算滤波，直接把原始温度同步给时域滤波状态，
+                 * 避免把遮挡前的旧温度带回来产生"重影"。 */
+                if (--resync_left == 0) {
+                    memcpy(filtered_temp, raw_temp_matrix, MLX_RAW_PIXELS * sizeof(float));
+                    range_initialized = false;   /* 让自动量程重新平滑，避免色阶突变 */
+                }
+                vTaskDelay(pdMS_TO_TICKS(2));
                 continue;
             }
 
-            /* ------------------------------------------------------------
-             * 2. Assemble a truly complete 32x24 frame from two fresh
-             *    subpages. No more "current subpage + previous frame"
-             *    blending here.
-             * ------------------------------------------------------------ */
-            for (int r = 0; r < MLX_RAW_H; r++) {
-                for (int c = 0; c < MLX_RAW_W; c++) {
-                    int idx = r * MLX_RAW_W + c;
-                    int page = (r + c) & 1;
-                    raw_full_matrix[idx] = subpage_temp[page][idx];
-                }
+            if (!subpage_init[0] || !subpage_init[1]) {
+                // 首轮先将 raw_temp_matrix 同步到 filtered_temp
+                memcpy(filtered_temp, raw_temp_matrix, MLX_RAW_PIXELS * sizeof(float));
+                vTaskDelay(pdMS_TO_TICKS(2));
+                continue;
             }
 
-            /* The two subpages have now both contributed to one complete
-             * displayed frame. The next display frame must receive a fresh
-             * sample from both pages again. */
-            subpage_ready[0] = false;
-            subpage_ready[1] = false;
+            // 2. 分场时域平滑 + 防趾蹼消交错
+            update_temporal_and_deinterlace(raw_temp_matrix, filtered_temp,
+                                            MLX_RAW_W, MLX_RAW_H, subpage);
 
-            /* ------------------------------------------------------------
-             * 3. Mild checkerboard mismatch suppression.
-             *    Keep this conservative; its job is only to suppress a
-             *    subpage boundary outlier, not to blur real hot spots.
-             * ------------------------------------------------------------ */
-            for (int r = 0; r < MLX_RAW_H; r++) {
-                for (int c = 0; c < MLX_RAW_W; c++) {
-                    int idx = r * MLX_RAW_W + c;
-                    float sum = 0.0f;
-                    int count = 0;
+            // 3. 中值异常点抑制：平坦区滤噪，手指/指缝区保护连通特征
+            spatial_median_outlier_filter(filtered_temp, median_temp,
+                                          MLX_RAW_W, MLX_RAW_H);
 
-                    if (r > 0) {
-                        sum += raw_full_matrix[(r - 1) * MLX_RAW_W + c];
-                        count++;
-                    }
-                    if (r < MLX_RAW_H - 1) {
-                        sum += raw_full_matrix[(r + 1) * MLX_RAW_W + c];
-                        count++;
-                    }
-                    if (c > 0) {
-                        sum += raw_full_matrix[r * MLX_RAW_W + (c - 1)];
-                        count++;
-                    }
-                    if (c < MLX_RAW_W - 1) {
-                        sum += raw_full_matrix[r * MLX_RAW_W + (c + 1)];
-                        count++;
-                    }
+            // 4. 按设置页选择的滤波算法生成最终的测温/显示矩阵（默认与原版双边滤波完全一致）
+            apply_spatial_filter(filtered_temp, median_temp, spatial_temp,
+                                 (int)g_ir_settings.filter_mode);
 
-                    if (count > 0) {
-                        float avg = sum / (float)count;
-                        float diff = fabsf(raw_full_matrix[idx] - avg);
-
-                        if (diff > 1.0f) {
-                            float blend = (diff - 1.0f) / 2.0f;
-                            if (blend > 0.50f) blend = 0.50f;
-                            raw_full_matrix[idx] =
-                                (1.0f - blend) * raw_full_matrix[idx]
-                                + blend * avg;
-                        }
+            /* 出厂校准偏移叠加到最终输出，不破坏原始滤波状态。 */
+            float calibration_offset = g_ir_settings.temperature_offset_c;
+            if (fabsf(calibration_offset) > 0.001f) {
+                for (int i = 0; i < MLX_RAW_PIXELS; i++) {
+                    if (isfinite(spatial_temp[i])) {
+                        spatial_temp[i] += calibration_offset;
                     }
                 }
             }
 
-            /* ------------------------------------------------------------
-             * 4. Temporal filtering.
-             *    - Tiny changes: strong smoothing.
-             *    - Medium changes: moderate response.
-             *    - Large changes: fast response.
-             * ------------------------------------------------------------ */
-            for (int i = 0; i < MLX_RAW_PIXELS; i++) {
-                if (filtered_temp[i] < 1.0f || !isfinite(filtered_temp[i])) {
-                    filtered_temp[i] = raw_full_matrix[i];
-                    continue;
-                }
-
-                float d = fabsf(raw_full_matrix[i] - filtered_temp[i]);
-                float alpha;
-
-                if (d > TEMP_FILTER_LARGE_THRESHOLD) {
-                    alpha = TEMP_FILTER_ALPHA_LARGE;
-                } else if (d > TEMP_FILTER_MEDIUM_THRESHOLD) {
-                    alpha = TEMP_FILTER_ALPHA_MEDIUM;
-                } else {
-                    alpha = TEMP_FILTER_ALPHA_SMALL;
-                }
-
-                filtered_temp[i] =
-                    alpha * raw_full_matrix[i]
-                    + (1.0f - alpha) * filtered_temp[i];
-            }
-
-            /* ------------------------------------------------------------
-             * 5. Mild spatial denoise.
-             * ------------------------------------------------------------ */
-            spatial_filter_natural(filtered_temp, spatial_temp,
-                                   MLX_RAW_W, MLX_RAW_H);
-
-            /* ------------------------------------------------------------
-             * 6. Statistics for HUD / markers only.
-             *    These values DO NOT control the color mapping in the
-             *    default fixed-range mode.
-             * ------------------------------------------------------------ */
+            // 5. 统计极值
             float cur_min = 200.0f;
             float cur_max = -50.0f;
             int max_idx = 0;
@@ -482,16 +1255,9 @@ void ir_camera_task_main(void *pvParameters)
 
             for (int i = 0; i < MLX_RAW_PIXELS; i++) {
                 float val = spatial_temp[i];
-
                 if (val > 1.0f && val < 200.0f && isfinite(val)) {
-                    if (val < cur_min) {
-                        cur_min = val;
-                        min_idx = i;
-                    }
-                    if (val > cur_max) {
-                        cur_max = val;
-                        max_idx = i;
-                    }
+                    if (val < cur_min) { cur_min = val; min_idx = i; }
+                    if (val > cur_max) { cur_max = val; max_idx = i; }
                     valid_pts++;
                 }
             }
@@ -501,41 +1267,48 @@ void ir_camera_task_main(void *pvParameters)
                 continue;
             }
 
-            /* ------------------------------------------------------------
-             * 7. FPS
-             * ------------------------------------------------------------ */
-            int64_t now_us = esp_timer_get_time();
-            int64_t diff_us = now_us - last_time_us;
-
-            if (diff_us >= 1000000) {
-                real_fps = (float)frame_count * 1000000.0f / (float)diff_us;
-                frame_count = 0;
-                last_time_us = now_us;
+#if THERMAL_USE_AUTO_RANGE
+            // 用 5%/95% 分位数决定颜色映射范围，避免单个异常像素拉伸整幅图像。
+            // 降发热优化：O(n) 直方图分位数替代每帧 qsort 768 个 float。
+            static uint16_t temp_hist[THERMAL_HIST_BINS];
+            memset(temp_hist, 0, sizeof(temp_hist));
+            int n_valid = 0;
+            for (int i = 0; i < MLX_RAW_PIXELS; i++) {
+                float t = spatial_temp[i];
+                if (isfinite(t) && t > 1.0f && t < 200.0f) {
+                    int bin = (int)((t - 1.0f) * 10.0f);
+                    if (bin < 0) bin = 0;
+                    if (bin >= THERMAL_HIST_BINS) bin = THERMAL_HIST_BINS - 1;
+                    temp_hist[bin]++;
+                    n_valid++;
+                }
             }
 
-            float center_t = spatial_temp[12 * MLX_RAW_W + 16];
+            float robust_min = cur_min;
+            float robust_max = cur_max;
+            if (n_valid >= 100) {
+                int lo_need = n_valid * THERMAL_PERCENTILE_LOW / 100;
+                int acc = 0, lo_bin = 0;
+                while (lo_bin < THERMAL_HIST_BINS && acc + temp_hist[lo_bin] < lo_need) {
+                    acc += temp_hist[lo_bin++];
+                }
+                robust_min = 1.0f + (float)lo_bin * 0.1f;
 
-            snprintf(text_fps, sizeof(text_fps), "%.1f FPS", real_fps);
-            snprintf(text_info, sizeof(text_info),
-                     "MAX: %.1f C    MIN: %.1f C\nCEN: %.1f C    DT: %.1f C",
-                     cur_max, cur_min, center_t, (cur_max - cur_min));
-            snprintf(text_max_tag, sizeof(text_max_tag), "MAX %.1f", cur_max);
-            snprintf(text_min_tag, sizeof(text_min_tag), "MIN %.1f", cur_min);
+                int hi_need = n_valid - n_valid * THERMAL_PERCENTILE_HIGH / 100;
+                acc = 0;
+                int hi_bin = THERMAL_HIST_BINS - 1;
+                while (hi_bin >= 0 && acc + temp_hist[hi_bin] < hi_need) {
+                    acc += temp_hist[hi_bin--];
+                }
+                robust_max = 1.0f + (float)hi_bin * 0.1f;
+            }
 
-            /* ------------------------------------------------------------
-             * 8. Optional slow auto-range.
-             *    Disabled by default because fixed-range rendering is much
-             *    more stable for a static indoor scene.
-             * ------------------------------------------------------------ */
-#if THERMAL_USE_AUTO_RANGE
-            float target_min = cur_min - AUTO_RANGE_PADDING_C;
-            float target_max = cur_max + AUTO_RANGE_PADDING_C;
+            float target_min = robust_min - AUTO_RANGE_LOW_PADDING_C;
+            float target_max = robust_max + AUTO_RANGE_HIGHLIGHT_HEADROOM_C;
 
-            float target_span = target_max - target_min;
-            if (target_span < AUTO_RANGE_MIN_SPAN_C) {
-                float center = 0.5f * (target_min + target_max);
-                target_min = center - 0.5f * AUTO_RANGE_MIN_SPAN_C;
-                target_max = center + 0.5f * AUTO_RANGE_MIN_SPAN_C;
+            // 当画面中没有高温物体（温差小于 10℃）时，优先向下扩展量程上限，将背景固定在深蓝暗部
+            if ((target_max - target_min) < AUTO_RANGE_MIN_SPAN_C) {
+                target_max = target_min + AUTO_RANGE_MIN_SPAN_C;
             }
 
             if (!range_initialized) {
@@ -548,111 +1321,157 @@ void ir_camera_task_main(void *pvParameters)
             }
 #endif
 
-            if (valid_pts > 400) {
-                /* --------------------------------------------------------
-                 * 9. Temperature -> 0..255 mapping.
-                 * -------------------------------------------------------- */
-                temperature_to_norm_u8(spatial_temp, norm_matrix,
-                                       smooth_min_t, smooth_max_t);
+            // 6. 帧率统计与 HUD 字符串格式化
+            int64_t now_us = esp_timer_get_time();
+            int64_t diff_us = now_us - last_time_us;
+            if (diff_us >= 1000000) {
+                real_fps = (float)frame_count * 1000000.0f / (float)diff_us;
+                frame_count = 0;
+                last_time_us = now_us;
+            }
 
+            int center_idx = screen_xy_to_raw_idx(MLX_INTERP_W / 2,
+                                                  MLX_INTERP_H / 2);
+            int fixture_idx = screen_xy_to_raw_idx(g_ir_settings.fixture_px_x,
+                                                   g_ir_settings.fixture_px_y);
+            float center_t = spatial_temp[center_idx];
+            float fixture_t = spatial_temp[fixture_idx];
+            float record_t = g_ir_settings.label_fixture ? fixture_t : center_t;
+
+            float chart_t = center_t;
+            switch (g_ir_settings.chart_source) {
+            case IR_CHART_SRC_FIXTURE: chart_t = fixture_t; break;
+            case IR_CHART_SRC_MAX: chart_t = cur_max; break;
+            case IR_CHART_SRC_MIN: chart_t = cur_min; break;
+            default: chart_t = center_t; break;
+            }
+
+            int64_t chart_now_us = esp_timer_get_time();
+            if (last_chart_us == 0 ||
+                chart_now_us - last_chart_us >= (int64_t)IR_CHART_SAMPLE_MS * 1000) {
+                ir_camera_chart_push(chart_t);
+                last_chart_us = chart_now_us;
+            }
+
+            const char *unit = "C";
+            float disp_max = ir_camera_convert_temp(cur_max, &unit);
+            float disp_min = ir_camera_convert_temp(cur_min, NULL);
+            float disp_record = ir_camera_convert_temp(record_t, NULL);
+            float disp_dt = disp_max - disp_min;
+
+            snprintf(text_fps, sizeof(text_fps), "%.1f FPS", real_fps);
+            snprintf(text_info, sizeof(text_info),
+                     "%s %.1f %s   %s %.1f %s\n%s %.1f %s   %s %.1f %s",
+                     lang_str(STR_MAX), disp_max, unit,
+                     lang_str(STR_MIN), disp_min, unit,
+                     g_ir_settings.label_fixture ? lang_str(STR_FIX) : lang_str(STR_CENTER),
+                     disp_record, unit, lang_str(STR_DT), disp_dt, unit);
+            snprintf(text_max_tag, sizeof(text_max_tag), "%s %.1f %s",
+                     lang_str(STR_MAX), disp_max, unit);
+            snprintf(text_min_tag, sizeof(text_min_tag), "%s %.1f %s",
+                     lang_str(STR_MIN), disp_min, unit);
+            snprintf(text_fix_tag, sizeof(text_fix_tag), "%s %.1f %s",
+                     lang_str(STR_FIX),
+                     ir_camera_convert_temp(fixture_t, NULL), unit);
+
+            // 7. 映射并进行双线性插值送显
+            /* 降发热优化 1：只在整帧完成（子页0）时送显。
+             * 16Hz 传感器每个子页都全屏重绘 = 16fps 送显；现在只整帧送显（8fps），
+             * LVGL 软件旋转渲染 + 280x240 双线性放大 + SPI 全屏传输全部减半。
+             * 画面被设置页/相册/息屏遮挡时也不送显。 */
+            bool do_display = (!ui_blocked && subpage == 0);
+
+            if (do_display && valid_pts > 400) {
+                temperature_to_norm_u8(spatial_temp, norm_matrix, smooth_min_t, smooth_max_t);
+                memcpy(s_norm_snapshot, norm_matrix, sizeof(s_norm_snapshot));
+                s_snapshot_min_t = smooth_min_t;
+                s_snapshot_max_t = smooth_max_t;
                 uint16_t *cur_write_buf = s_display_buf[s_back_idx];
 
-                /* --------------------------------------------------------
-                 * 10. 32x24 -> 240x280 bilinear scaling and color LUT.
-                 * -------------------------------------------------------- */
                 bilinear_scale_fullscreen_1to1(
                     norm_matrix,
-                    MLX_RAW_W,
+                    MLX_RAW_W, 
                     MLX_RAW_H,
                     cur_write_buf,
-                    MLX_INTERP_W,
+                    MLX_INTERP_W, 
                     MLX_INTERP_H,
-                    s_ironbow_lut);
+                    s_color_lut
+                );
 
-                /* --------------------------------------------------------
-                 * 11. Markers.
-                 * -------------------------------------------------------- */
-                int max_raw_r = max_idx / MLX_RAW_W;
-                int max_raw_c = max_idx % MLX_RAW_W;
-                int max_px_y = (max_raw_r * (MLX_INTERP_H - 1)) / (MLX_RAW_H - 1);
-                int max_px_x = (int)(((max_raw_c << 16) - s_x_start_fp) / s_scale_fp);
+                int max_px_x, max_px_y, min_px_x, min_px_y;
+                raw_rc_to_screen_xy(max_idx / MLX_RAW_W, max_idx % MLX_RAW_W, &max_px_x, &max_px_y);
+                raw_rc_to_screen_xy(min_idx / MLX_RAW_W, min_idx % MLX_RAW_W, &min_px_x, &min_px_y);
 
-                if (max_px_x < 0) max_px_x = 0;
-                if (max_px_x >= MLX_INTERP_W) max_px_x = MLX_INTERP_W - 1;
-
-                int min_raw_r = min_idx / MLX_RAW_W;
-                int min_raw_c = min_idx % MLX_RAW_W;
-                int min_px_y = (min_raw_r * (MLX_INTERP_H - 1)) / (MLX_RAW_H - 1);
-                int min_px_x = (int)(((min_raw_c << 16) - s_x_start_fp) / s_scale_fp);
-
-                if (min_px_x < 0) min_px_x = 0;
-                if (min_px_x >= MLX_INTERP_W) min_px_x = MLX_INTERP_W - 1;
-
-                draw_diamond_marker(cur_write_buf, max_px_x, max_px_y,
-                                    MLX_INTERP_W, MLX_INTERP_H, 5, 0xF800);
-                draw_diamond_marker(cur_write_buf, min_px_x, min_px_y,
-                                    MLX_INTERP_W, MLX_INTERP_H, 5, 0x07FF);
+                if (g_ir_settings.label_hottest) {
+                    draw_diamond_marker(cur_write_buf, max_px_x, max_px_y,
+                                        MLX_INTERP_W, MLX_INTERP_H, 5, 0xF800);
+                }
+                if (g_ir_settings.label_coldest) {
+                    draw_diamond_marker(cur_write_buf, min_px_x, min_px_y,
+                                        MLX_INTERP_W, MLX_INTERP_H, 5, 0x07FF);
+                }
                 draw_diamond_marker(cur_write_buf,
-                                    MLX_INTERP_W / 2,
-                                    MLX_INTERP_H / 2,
-                                    MLX_INTERP_W,
-                                    MLX_INTERP_H,
-                                    3,
-                                    0xFFFF);
+                                    g_ir_settings.label_fixture
+                                        ? g_ir_settings.fixture_px_x : MLX_INTERP_W / 2,
+                                    g_ir_settings.label_fixture
+                                        ? g_ir_settings.fixture_px_y : MLX_INTERP_H / 2,
+                                    MLX_INTERP_W, MLX_INTERP_H,
+                                    g_ir_settings.label_fixture ? 5 : 3,
+                                    g_ir_settings.label_fixture ? 0x07E0 : 0xFFFF);
 
-                /* --------------------------------------------------------
-                 * 12. LVGL update.
-                 * -------------------------------------------------------- */
+                // 8. 刷新到 LVGL 显存
                 if (example_lvgl_lock(100)) {
                     s_thermal_img_dsc.data = (const uint8_t *)cur_write_buf;
-
                     if (img_thermal) {
                         lv_img_set_src(img_thermal, &s_thermal_img_dsc);
                         lv_obj_invalidate(img_thermal);
                     }
-
-                    if (label_fps_float) {
-                        lv_label_set_text(label_fps_float, text_fps);
+                    if (label_fps_float) lv_label_set_text(label_fps_float, text_fps);
+                    if (label_info) lv_label_set_text(label_info, text_info);
+                    if (tag_emissivity) {
+                        char ebuf[24];
+                        snprintf(ebuf, sizeof(ebuf), "e:%.2f",
+                                 (double)g_ir_settings.emissivity);
+                        lv_label_set_text(tag_emissivity, ebuf);
                     }
 
-                    if (label_info) {
-                        lv_label_set_text(label_info, text_info);
-                    }
-
+                    /* 温度气泡夹在屏幕内，防止超出 280x240 */
                     if (tag_max) {
-                        int pos_x = (max_px_x > 175) ? (max_px_x - 58) : (max_px_x + 8);
-                        int pos_y = (max_px_y < 45)
-                                  ? (max_px_y + 10)
-                                  : ((max_px_y > 215) ? (max_px_y - 18) : (max_px_y - 8));
-                        lv_label_set_text(tag_max, text_max_tag);
-                        lv_obj_set_pos(tag_max, pos_x, pos_y);
+                        if (g_ir_settings.label_hottest) {
+                            lv_obj_clear_flag(tag_max, LV_OBJ_FLAG_HIDDEN);
+                            place_temp_tag(tag_max, max_px_x, max_px_y, text_max_tag);
+                        } else {
+                            lv_obj_add_flag(tag_max, LV_OBJ_FLAG_HIDDEN);
+                        }
                     }
-
                     if (tag_min) {
-                        int pos_x = (min_px_x > 175) ? (min_px_x - 58) : (min_px_x + 8);
-                        int pos_y = (min_px_y < 45)
-                                  ? (min_px_y + 10)
-                                  : ((min_px_y > 215) ? (min_px_y - 18) : (min_px_y - 8));
-                        lv_label_set_text(tag_min, text_min_tag);
-                        lv_obj_set_pos(tag_min, pos_x, pos_y);
+                        if (g_ir_settings.label_coldest) {
+                            lv_obj_clear_flag(tag_min, LV_OBJ_FLAG_HIDDEN);
+                            place_temp_tag(tag_min, min_px_x, min_px_y, text_min_tag);
+                        } else {
+                            lv_obj_add_flag(tag_min, LV_OBJ_FLAG_HIDDEN);
+                        }
+                    }
+                    if (tag_fix) {
+                        if (g_ir_settings.label_fixture) {
+                            lv_obj_clear_flag(tag_fix, LV_OBJ_FLAG_HIDDEN);
+                            place_temp_tag(tag_fix,
+                                           g_ir_settings.fixture_px_x,
+                                           g_ir_settings.fixture_px_y,
+                                           text_fix_tag);
+                        } else {
+                            lv_obj_add_flag(tag_fix, LV_OBJ_FLAG_HIDDEN);
+                        }
                     }
 
                     if (s_display_buf[0] != s_display_buf[1]) {
                         s_back_idx = 1U - s_back_idx;
                     }
-
                     example_lvgl_unlock();
                 }
             }
         }
 
-        /* MLX90640 is configured for 16Hz in ir_mlx90640_app.h.
-         * A short task delay avoids hammering I2C while keeping the response
-         * fast enough for a thermal display. */
-        if (status >= 0) {
-            vTaskDelay(pdMS_TO_TICKS(2));
-        } else {
-            vTaskDelay(pdMS_TO_TICKS(10));
-        }
+        vTaskDelay(pdMS_TO_TICKS(status >= 0 ? 2 : 10));
     }
 }

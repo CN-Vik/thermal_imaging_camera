@@ -18,14 +18,27 @@
 #include "esp_log.h"
 #include "lvgl.h"
 #include "ir_mlx90640_app.h"
-
+#include "dev_sys.h"
+#include "lang.h"
+#include "boot_ui.h"
+#include "photo.h"
+#include "ir_settings_ui.h"
+#include "esp_lcd_touch_cst816s.h"
+#include "driver/i2c_master.h"
 #include "esp_lcd_panel_st7789.h"
+#include "esp_pm.h"
+#include "driver/gpio.h"
 
 // #if CONFIG_EXAMPLE_LCD_TOUCH_CONTROLLER_STMPE610
 // #include "esp_lcd_touch_stmpe610.h"
 // #endif
 
 static const char *TAG = "thermal imaging_eg";
+
+#define CONFIG_EXAMPLE_LCD_TOUCH_ENABLED    1
+
+#define PIN_PWR_HOLD    GPIO_NUM_36  // 电源自锁输出
+#define PIN_KEY_DET     GPIO_NUM_37  // 按键检测输入
 
 // Using SPI2 in the example
 #define LCD_HOST SPI2_HOST
@@ -36,33 +49,103 @@ static const char *TAG = "thermal imaging_eg";
 #define EXAMPLE_LCD_PIXEL_CLOCK_HZ (40 * 1000 * 1000)
 #define EXAMPLE_LCD_BK_LIGHT_ON_LEVEL 1
 #define EXAMPLE_LCD_BK_LIGHT_OFF_LEVEL !EXAMPLE_LCD_BK_LIGHT_ON_LEVEL
-#define EXAMPLE_PIN_NUM_SCLK 18
-#define EXAMPLE_PIN_NUM_MOSI 19
-#define EXAMPLE_PIN_NUM_MISO -1
-#define EXAMPLE_PIN_NUM_LCD_DC 5
-#define EXAMPLE_PIN_NUM_LCD_RST 3
-#define EXAMPLE_PIN_NUM_LCD_CS 4
-#define EXAMPLE_PIN_NUM_BK_LIGHT 2
-#define EXAMPLE_PIN_NUM_TOUCH_CS 15
+
+// 屏幕 SPI 引脚
+#define EXAMPLE_PIN_NUM_SCLK 13        // 原 12 -> 改为 13 (对应原理图 SCL)
+#define EXAMPLE_PIN_NUM_MOSI 12        // 原 11 -> 改为 12 (对应原理图 SDA)
+#define EXAMPLE_PIN_NUM_MISO -1        // 无需 MISO
+#define EXAMPLE_PIN_NUM_LCD_DC 17      // 原 10 -> 改为 17 (对应原理图 D/C#)
+#define EXAMPLE_PIN_NUM_LCD_RST 9      // 保持 9 (对应原理图 RESET)
+#define EXAMPLE_PIN_NUM_LCD_CS 14      // 原 8  -> 改为 14 (对应原理图 CS)
+
+// 背光引脚（原理图 Pin 17 为 LEDK 阴极，通常外接 MOS 管控制）
+#define EXAMPLE_PIN_NUM_BK_LIGHT 18    // 若你的背光控制 GPIO 未变，保持 18
+
+// 触摸屏 I2C 引脚（若后续启用触摸）
+#define EXAMPLE_PIN_NUM_TOUCH_SCL 11   // 对应原理图 TP_SCL
+#define EXAMPLE_PIN_NUM_TOUCH_SDA 10   // 对应原理图 TP_SDA
+#define EXAMPLE_PIN_NUM_TOUCH_RST 9    // 对应原理图 TP-RST (与屏幕共用 IO9)
+#define EXAMPLE_PIN_NUM_TOUCH_INT 8    // 对应原理图 TP_INT
 
 #define EXAMPLE_LCD_H_RES 240
 #define EXAMPLE_LCD_V_RES 280
 #define LCD_BUF_LINES 45 // 增大单次切片行数
 
+/* =============================================================================
+ * 屏幕方向配置（客户要求：物理屏是竖屏 240x280，但所有 UI 必须以横屏 280x240 呈现）
+ * -----------------------------------------------------------------------------
+ * 采用 LVGL 软件旋转：disp_drv.sw_rotate = 1 + LV_DISP_ROT_270
+ *  1. LVGL 逻辑分辨率自动变为 280x240，UI 全部按横屏坐标布局；
+ *  2. LVGL 负责像素旋转，并换算成物理坐标(240x280)回调 flush_cb，
+ *     面板保持原生竖屏配置（含下方 set_gap(0,20) 的 20px 偏移，勿动）；
+ *  3. 触摸坐标由 LVGL 自动旋转，无需修改触摸驱动；
+ *  4. 整个画面相对默认横屏方向上下颠倒（180° 翻转），开机图/热像图/设置/欢迎界面随之一起翻转；
+ *     - 仅热像图方向不对：调 ir_mlx90640_app.c 里的 IR_MIRROR_X / IR_MIRROR_Y。
+ * ============================================================================= */
+#define UI_DISP_ROTATION   LV_DISP_ROT_270
+#define UI_SCREEN_W        280   // 横屏逻辑宽
+#define UI_SCREEN_H        240   // 横屏逻辑高
+
 // Bit number used to represent command and parameter
 #define EXAMPLE_LCD_CMD_BITS 8
 #define EXAMPLE_LCD_PARAM_BITS 8
 
-#define EXAMPLE_LVGL_TICK_PERIOD_MS 2
+#define EXAMPLE_LVGL_TICK_PERIOD_MS 5
 #define EXAMPLE_LVGL_TASK_MAX_DELAY_MS 500
 #define EXAMPLE_LVGL_TASK_MIN_DELAY_MS 1
-#define EXAMPLE_LVGL_TASK_STACK_SIZE (4 * 1024)
+#define EXAMPLE_LVGL_TASK_STACK_SIZE (8 * 1024)
 #define EXAMPLE_LVGL_TASK_PRIORITY 2
 
 static SemaphoreHandle_t lvgl_mux = NULL;
 
 #if CONFIG_EXAMPLE_LCD_TOUCH_ENABLED
+
 esp_lcd_touch_handle_t tp = NULL;
+#define TOUCH_I2C_PORT    I2C_NUM_1
+
+
+
+static esp_err_t app_touch_init(void)
+{
+    // 1. 初始化独立的 I2C_NUM_1 总线 (用于触摸 CST816)
+    i2c_master_bus_config_t bus_config = {
+        .i2c_port = TOUCH_I2C_PORT,              // 独立使用 I2C_NUM_1
+        .sda_io_num = EXAMPLE_PIN_NUM_TOUCH_SDA, // IO10
+        .scl_io_num = EXAMPLE_PIN_NUM_TOUCH_SCL, // IO11
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt = 7,
+        .flags.enable_internal_pullup = true,
+    };
+    i2c_master_bus_handle_t tp_i2c_bus = NULL;
+    ESP_ERROR_CHECK(i2c_new_master_bus(&bus_config, &tp_i2c_bus));
+
+    // 2. 创建 Touch Panel IO (传入新驱动的 bus 句柄)
+    esp_lcd_panel_io_handle_t tp_io_handle = NULL;
+    esp_lcd_panel_io_i2c_config_t tp_io_config = ESP_LCD_TOUCH_IO_I2C_CST816S_CONFIG();
+    ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c(tp_i2c_bus, &tp_io_config, &tp_io_handle));
+
+    // 3. 配置 CST816 驱动
+    esp_lcd_touch_config_t tp_cfg = {
+        .x_max = EXAMPLE_LCD_H_RES,            // 240
+        .y_max = EXAMPLE_LCD_V_RES,            // 280
+        .rst_gpio_num = -1,                    // 共用屏幕复位 IO9，填 -1 防止冲刷屏幕
+        .int_gpio_num = EXAMPLE_PIN_NUM_TOUCH_INT, // IO8
+        .levels = {
+            .reset = 0,
+            .interrupt = 0,
+        },
+        .flags = {
+            .swap_xy = 0,
+            .mirror_x = 0,
+            .mirror_y = 0,
+        },
+    };
+
+    ESP_LOGI(TAG, "Initialize CST816 touch driver on I2C_NUM_1");
+    return esp_lcd_touch_new_i2c_cst816s(tp_io_handle, &tp_cfg, &tp);
+}
+
+
 #endif
 
 extern TaskHandle_t ir_task_Handle;
@@ -86,55 +169,13 @@ static void example_lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_
     esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, color_map);
 }
 
-/* Rotate display and touch, when rotated screen in LVGL. Called when driver parameters are updated. */
-static void example_lvgl_port_update_callback(lv_disp_drv_t *drv)
-{
-    esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t)drv->user_data;
-
-    switch (drv->rotated)
-    {
-    case LV_DISP_ROT_NONE:
-        // Rotate LCD display
-        esp_lcd_panel_swap_xy(panel_handle, false);
-        esp_lcd_panel_mirror(panel_handle, true, false);
-#if CONFIG_EXAMPLE_LCD_TOUCH_ENABLED
-        // Rotate LCD touch
-        esp_lcd_touch_set_mirror_y(tp, false);
-        esp_lcd_touch_set_mirror_x(tp, false);
-#endif
-        break;
-    case LV_DISP_ROT_90:
-        // Rotate LCD display
-        esp_lcd_panel_swap_xy(panel_handle, true);
-        esp_lcd_panel_mirror(panel_handle, true, true);
-#if CONFIG_EXAMPLE_LCD_TOUCH_ENABLED
-        // Rotate LCD touch
-        esp_lcd_touch_set_mirror_y(tp, false);
-        esp_lcd_touch_set_mirror_x(tp, false);
-#endif
-        break;
-    case LV_DISP_ROT_180:
-        // Rotate LCD display
-        esp_lcd_panel_swap_xy(panel_handle, false);
-        esp_lcd_panel_mirror(panel_handle, false, true);
-#if CONFIG_EXAMPLE_LCD_TOUCH_ENABLED
-        // Rotate LCD touch
-        esp_lcd_touch_set_mirror_y(tp, false);
-        esp_lcd_touch_set_mirror_x(tp, false);
-#endif
-        break;
-    case LV_DISP_ROT_270:
-        // Rotate LCD display
-        esp_lcd_panel_swap_xy(panel_handle, true);
-        esp_lcd_panel_mirror(panel_handle, false, false);
-#if CONFIG_EXAMPLE_LCD_TOUCH_ENABLED
-        // Rotate LCD touch
-        esp_lcd_touch_set_mirror_y(tp, false);
-        esp_lcd_touch_set_mirror_x(tp, false);
-#endif
-        break;
-    }
-}
+/* =============================================================================
+ * 注意：横屏方案使用 LVGL 软件旋转（sw_rotate = 1），LVGL 内部完成像素旋转，
+ * 并直接按物理坐标(240x280)回调 flush_cb。因此面板必须始终保持原生竖屏配置
+ * （swap_xy = false, mirror = false,false，即上面 init 后的状态），
+ * 不要再用 esp_lcd_panel_swap_xy / mirror 旋转面板，否则会双重旋转。
+ * 触摸坐标同样由 LVGL 自动旋转。
+ * ============================================================================= */
 
 #if CONFIG_EXAMPLE_LCD_TOUCH_ENABLED
 static void example_lvgl_touch_cb(lv_indev_drv_t *drv, lv_indev_data_t *data)
@@ -144,15 +185,19 @@ static void example_lvgl_touch_cb(lv_indev_drv_t *drv, lv_indev_data_t *data)
     uint8_t touchpad_cnt = 0;
 
     /* Read touch controller data */
+    /* 读取 CST816 触摸数据 */
     esp_lcd_touch_read_data(drv->user_data);
 
     /* Get coordinates */
+    /* 获取触控坐标 */
     bool touchpad_pressed = esp_lcd_touch_get_coordinates(drv->user_data, touchpad_x, touchpad_y, NULL, &touchpad_cnt, 1);
 
     if (touchpad_pressed && touchpad_cnt > 0)
     {
         data->point.x = touchpad_x[0];
-        data->point.y = touchpad_y[0];
+        // 扣除屏幕控制器的 20px GAP 偏移（根据实际点按校准）
+        int16_t y = touchpad_y[0] - 20;
+        data->point.y = (y < 0) ? 0 : y;
         data->state = LV_INDEV_STATE_PRESSED;
     }
     else
@@ -214,12 +259,43 @@ static void example_lvgl_port_task(void *arg)
     }
 }
 
+
+
 void app_main(void)
 {
     static lv_disp_draw_buf_t disp_buf; // contains internal graphic buffer(s) called draw buffer(s)
     static lv_disp_drv_t disp_drv;      // contains callback functions
 
-    ESP_LOGI(TAG, "Turn off LCD backlight");
+    power_on();
+
+#if CONFIG_PM_ENABLE
+    /* ============ 降发热：空闲自动进入 light sleep ============
+     * 等待 MLX90640 下一帧（约 60ms）时两个核都会空闲，
+     * 自动休眠把平均电流从 40mA 级降到 10mA 以下，芯片温度大幅下降。
+     */
+    esp_pm_config_t pm_config = {
+        .max_freq_mhz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
+        .min_freq_mhz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
+        .light_sleep_enable = true,
+    };
+    ESP_ERROR_CHECK(esp_pm_configure(&pm_config));
+
+    /* 休眠时 GPIO 会被隔离省电（PM_SLP_DISABLE_GPIO 由 S3 复位工作区自动开启）。
+     * 下面这些引脚必须保持原状态，否则电源自锁/屏幕复位/背光在休眠时可能失效或闪烁。 */
+    static const int keep_gpios[] = {
+        PIN_PWR_HOLD, PIN_KEY_DET,
+        EXAMPLE_PIN_NUM_SCLK, EXAMPLE_PIN_NUM_MOSI,
+        EXAMPLE_PIN_NUM_LCD_DC, EXAMPLE_PIN_NUM_LCD_RST,
+        EXAMPLE_PIN_NUM_LCD_CS, EXAMPLE_PIN_NUM_BK_LIGHT,
+        EXAMPLE_PIN_NUM_TOUCH_SCL, EXAMPLE_PIN_NUM_TOUCH_SDA,
+        EXAMPLE_PIN_NUM_TOUCH_INT,
+    };
+    for (size_t i = 0; i < sizeof(keep_gpios) / sizeof(keep_gpios[0]); i++) {
+        gpio_sleep_sel_dis(keep_gpios[i]);
+    }
+#endif
+
+    ESP_LOGI(TAG, "Turn_off_LCD_backlight");
     gpio_config_t bk_gpio_config = {
         .mode = GPIO_MODE_OUTPUT,
         .pin_bit_mask = 1ULL << EXAMPLE_PIN_NUM_BK_LIGHT
@@ -326,13 +402,29 @@ void app_main(void)
 
     ESP_LOGI(TAG, "Register display driver to LVGL");
     lv_disp_drv_init(&disp_drv);
-    disp_drv.hor_res = EXAMPLE_LCD_H_RES;
-    disp_drv.ver_res = EXAMPLE_LCD_V_RES;
+    disp_drv.hor_res = EXAMPLE_LCD_H_RES;   // 物理宽 240
+    disp_drv.ver_res = EXAMPLE_LCD_V_RES;   // 物理高 280
     disp_drv.flush_cb = example_lvgl_flush_cb;
-    disp_drv.drv_update_cb = example_lvgl_port_update_callback;
     disp_drv.draw_buf = &disp_buf;
     disp_drv.user_data = panel_handle;
+    /* 横屏：LVGL 软件旋转 270°（整体 180° 翻转），逻辑分辨率自动变为 280x240 */
+    disp_drv.rotated = UI_DISP_ROTATION;
+    disp_drv.sw_rotate = 1;
+    // 注册显示设备
     lv_disp_t *disp = lv_disp_drv_register(&disp_drv);
+
+    // --- 初始化触控并接入 LVGL ---
+    ESP_ERROR_CHECK(app_touch_init());
+
+    static lv_indev_drv_t indev_drv;
+    lv_indev_drv_init(&indev_drv);
+    indev_drv.type = LV_INDEV_TYPE_POINTER;
+    indev_drv.disp = disp;
+    indev_drv.read_cb = example_lvgl_touch_cb;
+    indev_drv.long_press_time = 500;  // 长按 0.5 秒进入参数设置
+    indev_drv.user_data = tp;
+    lv_indev_drv_register(&indev_drv);
+    // ----------------------------
 
     ESP_LOGI(TAG, "Install LVGL tick timer");
     // Tick interface for LVGL (using esp_timer to generate 2ms periodic event)
@@ -344,16 +436,16 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_timer_create(&lvgl_tick_timer_args, &lvgl_tick_timer));
     ESP_ERROR_CHECK(esp_timer_start_periodic(lvgl_tick_timer, EXAMPLE_LVGL_TICK_PERIOD_MS * 1000));
 
-#if CONFIG_EXAMPLE_LCD_TOUCH_ENABLED
-    static lv_indev_drv_t indev_drv; // Input device driver (Touch)
-    lv_indev_drv_init(&indev_drv);
-    indev_drv.type = LV_INDEV_TYPE_POINTER;
-    indev_drv.disp = disp;
-    indev_drv.read_cb = example_lvgl_touch_cb;
-    indev_drv.user_data = tp;
+// #if CONFIG_EXAMPLE_LCD_TOUCH_ENABLED
+//     // static lv_indev_drv_t indev_drv; // Input device driver (Touch)
+//     lv_indev_drv_init(&indev_drv);
+//     indev_drv.type = LV_INDEV_TYPE_POINTER;
+//     indev_drv.disp = disp;
+//     indev_drv.read_cb = example_lvgl_touch_cb;
+//     indev_drv.user_data = tp;
 
-    lv_indev_drv_register(&indev_drv);
-#endif
+//     lv_indev_drv_register(&indev_drv);
+// #endif
 
     lvgl_mux = xSemaphoreCreateRecursiveMutex();
     assert(lvgl_mux);
@@ -368,8 +460,17 @@ void app_main(void)
         0
     );
 
+    /* ============ 开机 Logo + 首次开机语言选择 ============ */
+    lang_init();
+    photo_init();
+    boot_show_splash(disp);
+    if (!lang_configured()) {
+        boot_show_language_select(disp);
+    }
+
     ESP_LOGI(TAG, "Init thermal buffer");
     ESP_ERROR_CHECK(ir_camera_app_init()); // 务必在创建 UI 前分配显存！
+    ESP_ERROR_CHECK(ir_settings_ui_init());
 
     ESP_LOGI(TAG, "Display LVGL Meter Widget");
     // Lock the mutex due to the LVGL APIs are not thread-safe
