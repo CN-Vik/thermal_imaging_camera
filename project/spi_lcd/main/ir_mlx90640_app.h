@@ -94,6 +94,7 @@ typedef struct {
     float gamma;
     float temperature_offset_c;
     ir_chart_source_t chart_source;
+    uint32_t reboot_cnt;
 } ir_app_settings_t;
 
 extern ir_app_settings_t g_ir_settings;

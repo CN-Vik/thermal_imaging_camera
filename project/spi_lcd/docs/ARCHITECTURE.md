@@ -606,7 +606,7 @@ static void schedule_page(settings_page_t page) {
 ```c
 typedef struct {
     uint32_t magic;      // 0x49525354 ("IRST")
-    uint32_t version;    // 当前 IR_SETTINGS_VERSION = 3
+    uint32_t version;    // 当前 IR_SETTINGS_VERSION = 4
     ir_app_settings_t settings;
 } ir_settings_nvs_blob_t;
 ```
@@ -622,11 +622,13 @@ if (读到 blob && magic 对 && version 对) {
 }
 ```
 
+v4 在设置末尾新增 `reboot_cnt`。v2/v3 旧 blob 按原长度兼容读取，保留原有设置并将启动计数从 0 开始迁移；每次启动加载设置后计数加 1 并立即写回 NVS，超过 3 次仅输出警告日志，不限制设备运行。
+
 **推论（非常重要）**：
 - **空白 flash 首次烧录** → 走 ③ → 得到 `s_default_settings` 里的默认值
 - **刷固件不会清 NVS** → 只要 `IR_SETTINGS_VERSION` 不变，旧 blob 一直有效，**改了默认值也看不出来**
 - 想让新默认值对老设备生效，必须二选一：
-  1. `IR_SETTINGS_VERSION` 加 1（代价：所有设置回默认）
+  1. `IR_SETTINGS_VERSION` 加 1（未实现旧 blob 兼容迁移时，所有设置回默认）
   2. `idf.py erase-flash`（全清，连照片和语言一起清）
 
 ### 8.3 字段表
@@ -650,6 +652,7 @@ if (读到 blob && magic 对 && version 对) {
 | `gamma` | float | 1.50 | 0.50~3.00 |
 | `temperature_offset_c` | float | 0.0 | 校准偏移 -10~+10 |
 | `chart_source` | enum | `IR_CENTER` | 曲线采样源 |
+| `reboot_cnt` | uint32_t | 0 | 启动计数；每次加载设置时加 1 并写入 NVS，超过 3 次仅告警 |
 
 > 载入后会调 `settings_clamp_to_valid_ranges()` 把越界值夹回合法范围，防止旧 blob/脏数据导致异常。
 

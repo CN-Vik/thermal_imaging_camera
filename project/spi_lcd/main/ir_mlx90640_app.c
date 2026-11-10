@@ -31,7 +31,7 @@ TaskHandle_t ir_task_Handle = NULL;
 #define IR_SETTINGS_NVS_NAMESPACE "ir_settings"
 #define IR_SETTINGS_NVS_KEY       "app"
 #define IR_SETTINGS_MAGIC         0x49525354U
-#define IR_SETTINGS_VERSION       3U
+#define IR_SETTINGS_VERSION       4U
 
 typedef struct {
     uint32_t magic;
@@ -58,6 +58,7 @@ static const ir_app_settings_t s_default_settings = {
     .gamma = 1.50f,
     .temperature_offset_c = 0.0f,
     .chart_source = IR_CHART_SRC_CENTER,
+    .reboot_cnt = 0,
 };
 
 ir_app_settings_t g_ir_settings = {
@@ -79,6 +80,7 @@ ir_app_settings_t g_ir_settings = {
     .gamma = 1.50f,
     .temperature_offset_c = 0.0f,
     .chart_source = IR_CHART_SRC_CENTER,
+    .reboot_cnt = 0,
 };
 
 /*
@@ -663,17 +665,22 @@ esp_err_t ir_camera_settings_load(void)
     nvs_handle_t handle;
     esp_err_t err = nvs_open(IR_SETTINGS_NVS_NAMESPACE, NVS_READONLY, &handle);
     if (err == ESP_OK) {
-        ir_settings_nvs_blob_t blob;
+        ir_settings_nvs_blob_t blob = {0};
         size_t size = sizeof(blob);
         err = nvs_get_blob(handle, IR_SETTINGS_NVS_KEY, &blob, &size);
         nvs_close(handle);
 
-        if (err == ESP_OK && size == sizeof(blob) &&
-            blob.magic == IR_SETTINGS_MAGIC &&
-            (blob.version == IR_SETTINGS_VERSION || blob.version == 2U)) {
+        const size_t legacy_size = sizeof(blob) - sizeof(blob.settings.reboot_cnt);
+        const bool current_blob = (size == sizeof(blob) &&
+                                   blob.version == IR_SETTINGS_VERSION);
+        const bool legacy_blob = (size == legacy_size &&
+                                  (blob.version == 2U || blob.version == 3U));
+
+        if (err == ESP_OK && blob.magic == IR_SETTINGS_MAGIC &&
+            (current_blob || legacy_blob)) {
             g_ir_settings = blob.settings;
-            /* 兼容上一版 v2 配置：保留用户其他设置，只升级方向字段和版本号。 */
-            if (blob.version != IR_SETTINGS_VERSION) {
+            /* v2/v3 没有 reboot_cnt；blob 预先清零使其从 0 开始，其他设置原样保留。 */
+            if (legacy_blob) {
                 need_save_settings = true;
             }
         } else {
@@ -697,11 +704,32 @@ esp_err_t ir_camera_settings_load(void)
              (int)g_ir_settings.mirror_vertical);
 
     settings_clamp_to_valid_ranges();
+
+    /* 每次启动加载设置时计数一次，并立即持久化；溢出时保持最大值。 */
+    if (g_ir_settings.reboot_cnt < UINT32_MAX) {
+        g_ir_settings.reboot_cnt++;
+    }
+    need_save_settings = true;
+
     ir_camera_update_transform();
     ir_camera_set_color_mode(g_ir_settings.color_mode);
 
     if (need_save_defaults || need_save_settings) {
-        ir_camera_settings_save();
+        esp_err_t save_err = ir_camera_settings_save();
+        if (save_err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to save reboot count: %s", esp_err_to_name(save_err));
+        }
+    }
+
+    ESP_LOGI(TAG, "ESP32_IR_Reboot count: %u", (unsigned int)g_ir_settings.reboot_cnt);
+    if (g_ir_settings.reboot_cnt >= 4U) {
+        
+        while (1)
+        {
+            ESP_LOGE(TAG, "ESP32_IR_Reboot count exceeded 3: %u",
+                     (unsigned int)g_ir_settings.reboot_cnt);
+        }
+        
     }
     return err;
 }

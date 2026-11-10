@@ -201,8 +201,8 @@ static void example_lvgl_touch_cb(lv_indev_drv_t *drv, lv_indev_data_t *data)
         data->state = LV_INDEV_STATE_PRESSED;
     
         // 临时测试打印
-        ESP_LOGI(TAG, "Touch_raw:[%d, %d]->mapped:[%d, %d]", 
-             touchpad_x[0], touchpad_y[0], data->point.x, data->point.y);
+        // ESP_LOGI(TAG, "Touch_raw:[%d, %d]->mapped:[%d, %d]", 
+            //  touchpad_x[0], touchpad_y[0], data->point.x, data->point.y);
     }
     else
     {

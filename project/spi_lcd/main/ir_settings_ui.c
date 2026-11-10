@@ -1485,6 +1485,7 @@ esp_err_t ir_settings_ui_init(void)
             .gamma = 1.50f,
             .temperature_offset_c = 0.0f,
             .chart_source = IR_CHART_SRC_CENTER,
+            .reboot_cnt = 0,
         };
         ir_camera_update_transform();
         ir_camera_set_color_mode(g_ir_settings.color_mode);
