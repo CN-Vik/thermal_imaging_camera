@@ -1,3 +1,7 @@
+# 编译优化：-O2（热成像浮点流水线在 -Og 下慢 2~4 倍，两个核满载是 ESP32 发热主因，
+# 热量经 PCB 传导给 MLX90640 导致"比别人热"）。只改编译优化，不动 CPU 频率/电源/传感器。
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
 CONFIG_LV_USE_USER_DATA=y
 CONFIG_LV_COLOR_16_SWAP=y
 CONFIG_LV_COLOR_DEPTH_16=y

@@ -13,6 +13,7 @@
 #include "MLX90640_API.h"
 #include "ir_mlx90640_app.h"
 #include "lang.h"
+#include "ir_settings_ui.h"
 
 static const char *TAG = "mlx_app";
 
@@ -119,6 +120,14 @@ ir_app_settings_t g_ir_settings = {
 #define AUTO_RANGE_ALPHA                0.04f
 #define THERMAL_PERCENTILE_LOW           5
 #define THERMAL_PERCENTILE_HIGH          95
+
+/* 降发热优化：正常显示保持 16Hz（流畅度不变），仅热像被遮挡/息屏时降频降耗。
+ *  - 设置菜单/调色板/相册/照片查看器 -> 4Hz（功耗约 15mA，退出恢复快）
+ *  - 息屏                             -> 1Hz（功耗约 10mA）
+ * 退出遮挡后丢弃 IR_RESYNC_FRAMES 帧，避免"半旧半新"错图。 */
+#define IR_IDLE_REFRESH_MENU   FPS4HZ
+#define IR_IDLE_REFRESH_SLEEP  FPS1HZ
+#define IR_RESYNC_FRAMES       2
 
 #define IR_SCREEN_W     280
 #define IR_SCREEN_H     240
@@ -1066,6 +1075,18 @@ static void temperature_to_norm_u8(const float *src, uint8_t *dst,
     }
 }
 
+/* 当前实际生效的传感器刷新率，避免重复写寄存器 */
+static uint8_t s_cur_refresh_rate = RefreshRate;
+
+/* 仅在目标刷新率变化时写 CTRL（写刷新率会重启传感器测量周期） */
+static void ir_set_refresh_rate(uint8_t rate)
+{
+    if (rate != s_cur_refresh_rate) {
+        MLX90640_SetRefreshRate(MLX90640_ADDR, rate);
+        s_cur_refresh_rate = rate;
+    }
+}
+
 void ir_camera_task_main(void *pvParameters)
 {
     (void)pvParameters;
@@ -1126,8 +1147,43 @@ void ir_camera_task_main(void *pvParameters)
     bool range_initialized = false;
 
     bool subpage_init[2] = {false, false};
+    bool ui_was_blocked = false;
+    int  resync_left = 0;
 
     while (1) {
+        /* 降发热优化：正常显示保持 16Hz（流畅度不变），仅热像被遮挡/息屏时降频。
+         * UI 状态查询必须持 LVGL 锁，避免读到被删除重建的菜单/相册对象。 */
+        bool ui_blocked = false;
+        bool chart_active = false;
+        bool screen_sleeping = false;
+        if (example_lvgl_lock(50)) {
+            screen_sleeping = ir_settings_ui_screen_sleeping();
+            ui_blocked = ir_settings_ui_is_open() ||
+                         thermal_ui_view_blocking() ||
+                         screen_sleeping;
+            chart_active = ir_settings_ui_chart_page_active();
+            example_lvgl_unlock();
+        }
+
+        if (ui_blocked && !chart_active) {
+            /* 完全遮挡：降频 + 只读帧清 data-ready，不跑滤波流水线 */
+            uint8_t idle_rate = screen_sleeping ? IR_IDLE_REFRESH_SLEEP : IR_IDLE_REFRESH_MENU;
+            ir_set_refresh_rate(idle_rate);
+            ui_was_blocked = true;
+            MLX90640_GetFrameData(MLX90640_ADDR, ir_frame_data);
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+
+        if (ui_was_blocked) {
+            /* 刚退出遮挡：恢复 16Hz + 重新同步，避免半旧半新错图 */
+            ui_was_blocked = false;
+            ir_set_refresh_rate(RefreshRate);
+            MLX90640_I2CWrite(MLX90640_ADDR, MLX90640_STATUS_REG,
+                              MLX90640_INIT_STATUS_VALUE);
+            resync_left = IR_RESYNC_FRAMES;
+        }
+
         int status = MLX90640_GetFrameData(MLX90640_ADDR, ir_frame_data);
 
         if (status >= 0) {
@@ -1156,6 +1212,16 @@ void ir_camera_task_main(void *pvParameters)
 
             subpage_init[subpage] = true;
             frame_count++;
+
+            if (resync_left > 0) {
+                /* 丢弃遮挡前残留的半帧，两个子场都刷新成新数据后再显示 */
+                if (--resync_left == 0) {
+                    memcpy(filtered_temp, raw_temp_matrix, MLX_RAW_PIXELS * sizeof(float));
+                    range_initialized = false;   /* 让自动量程重新平滑，避免色阶跳变 */
+                }
+                vTaskDelay(pdMS_TO_TICKS(2));
+                continue;
+            }
 
             if (!subpage_init[0] || !subpage_init[1]) {
                 // 首轮先将 raw_temp_matrix 同步到 filtered_temp
@@ -1297,8 +1363,8 @@ void ir_camera_task_main(void *pvParameters)
                      lang_str(STR_FIX),
                      ir_camera_convert_temp(fixture_t, NULL), unit);
 
-            // 7. 映射并进行双线性插值送显
-            if (valid_pts > 400) {
+            // 7. 映射并进行双线性插值送显（热像被遮挡/曲线页时不送显）
+            if (!ui_blocked && valid_pts > 400) {
                 temperature_to_norm_u8(spatial_temp, norm_matrix, smooth_min_t, smooth_max_t);
                 memcpy(s_norm_snapshot, norm_matrix, sizeof(s_norm_snapshot));
                 s_snapshot_min_t = smooth_min_t;

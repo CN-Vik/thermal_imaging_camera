@@ -25,14 +25,18 @@ extern "C" {
 #define MLX90640_ADDR           0x33
 #define TA_SHIFT                8
 
+#define FPS1HZ                  0x01
 #define FPS2HZ                  0x02
 #define FPS4HZ                  0x03
 #define FPS8HZ                  0x04
 #define FPS16HZ                 0x05
 #define FPS32HZ                 0x06
 
-// 8Hz 最佳降噪甜点档
-#define RefreshRate             FPS16HZ 
+/* MLX90640 刷新率（用户要求保持流畅度，固定 16Hz）。
+ * 注意：刷新率是 MLX90640 自发热的主因（16Hz 连续测量功耗约 33mA），
+ * 这是物理权衡——流畅度与传感器温升成正比，软件无法同时兼顾。
+ */
+#define RefreshRate             FPS16HZ
 
 typedef enum {
     IR_SCALE_CELSIUS = 0,
@@ -113,6 +117,7 @@ bool example_lvgl_lock(int timeout_ms);
 void example_lvgl_unlock(void);
 void ir_camera_task_main(void *pvParameters);
 void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp);
+bool thermal_ui_view_blocking(void);
 void ir_camera_set_color_mode(ir_color_mode_t mode);
 ir_color_mode_t ir_camera_get_color_mode(void);
 const uint8_t *ir_camera_get_frame(void);

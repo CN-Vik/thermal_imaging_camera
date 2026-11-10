@@ -1576,6 +1576,17 @@ bool ir_settings_ui_is_open(void)
     return s_is_open && s_root && !lv_obj_has_flag(s_root, LV_OBJ_FLAG_HIDDEN);
 }
 
+bool ir_settings_ui_screen_sleeping(void)
+{
+    return s_screen_sleeping;
+}
+
+bool ir_settings_ui_chart_page_active(void)
+{
+    return s_is_open && s_root && !lv_obj_has_flag(s_root, LV_OBJ_FLAG_HIDDEN) &&
+           s_current_page == PAGE_CHART;
+}
+
 void ir_settings_ui_refresh_language(void)
 {
     if (!s_root) return;
