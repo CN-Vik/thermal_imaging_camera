@@ -93,7 +93,10 @@ LANG_NAMES = {"ZH": "中文", "EN": "English", "RU": "Русский", "JA": "�
 # ---------------------------------------------------------------------------
 UI_FONT_FAMILY = "NotoSansSC"
 UI_FONT_WEIGHT = "Regular"     # "Regular" / "Medium" / "Bold"
-UI_FONT_SIZE   = 16
+UI_FONT_SIZE   = 18            # 16 → 18（+2 号）
+# 英文/数字使用 LVGL 内置 Montserrat，字号需与 sdkconfig
+# CONFIG_LV_FONT_MONTSERRAT_<N> 保持一致
+UI_ASCII_FONT_SIZE = UI_FONT_SIZE
 
 FONT_FAMILY_FILES = {
     # family: {weight: (ttf path, face index)}
@@ -372,7 +375,7 @@ def gen_lang_header_and_data():
     D.append("    case LANG_JA: return &app_font_ja;")
     D.append("    case LANG_KO: return &app_font_ko;")
     D.append("    case LANG_RU: return &app_font_ru;")
-    D.append("    default: return &lv_font_montserrat_14;")
+    D.append("    default: return &lv_font_montserrat_%d;" % UI_ASCII_FONT_SIZE)
     D.append("    }")
     D.append("}")
     D.append("")

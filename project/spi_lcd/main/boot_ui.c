@@ -104,7 +104,7 @@ void boot_show_language_select(lv_disp_t *disp)
     /* 标题（英文，作为中性提示） */
     lv_obj_t *title = lv_label_create(scr);
     lv_obj_set_style_text_color(title, lv_color_hex(T_PRIMARY_DEEP), LV_PART_MAIN);
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_18, LV_PART_MAIN);
     lv_label_set_text(title, "Select Language");
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 20);
 

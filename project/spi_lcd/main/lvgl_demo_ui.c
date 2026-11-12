@@ -420,7 +420,7 @@ static lv_obj_t *create_list_entry(lv_obj_t *parent, const char *text, bool red,
     if (arrow) {
         lv_obj_t *ind = lv_label_create(btn);
         lv_obj_set_style_text_color(ind, lv_color_hex(T_PRIMARY), LV_PART_MAIN);
-        lv_obj_set_style_text_font(ind, &lv_font_montserrat_14, LV_PART_MAIN);
+        lv_obj_set_style_text_font(ind, &lv_font_montserrat_18, LV_PART_MAIN);
         lv_label_set_text(ind, ">");
         lv_obj_align(ind, LV_ALIGN_RIGHT_MID, -16, 0);
     }
@@ -784,14 +784,14 @@ static void create_settings_menu(lv_obj_t *parent)
         // 中间模式名称
         lv_obj_t *lbl = lv_label_create(btn);
         lv_obj_set_style_text_color(lbl, lv_color_hex(T_TEXT_DARK), LV_PART_MAIN);
-        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, LV_PART_MAIN);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_18, LV_PART_MAIN);
         lv_label_set_text(lbl, ir_color_get_mode_name((ir_color_mode_t)i));
         lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 32, 0);
 
         // 右侧选中状态标识 ("ON")
         lv_obj_t *chk = lv_label_create(btn);
         lv_obj_set_style_text_color(chk, lv_color_white(), LV_PART_MAIN);
-        lv_obj_set_style_text_font(chk, &lv_font_montserrat_14, LV_PART_MAIN);
+        lv_obj_set_style_text_font(chk, &lv_font_montserrat_18, LV_PART_MAIN);
         lv_label_set_text(chk, "");
         lv_obj_align(chk, LV_ALIGN_RIGHT_MID, -10, 0);
 
@@ -883,7 +883,7 @@ static void create_settings_menu(lv_obj_t *parent)
 
     lv_obj_t *g_back = lv_label_create(g_header);
     lv_obj_set_style_text_color(g_back, lv_color_white(), LV_PART_MAIN);
-    lv_obj_set_style_text_font(g_back, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(g_back, &lv_font_montserrat_18, LV_PART_MAIN);
     lv_label_set_text(g_back, LV_SYMBOL_LEFT);
     lv_obj_center(g_back);
 
@@ -917,7 +917,7 @@ static void create_settings_menu(lv_obj_t *parent)
 
     s_gallery_size = lv_label_create(g_info);
     lv_obj_set_style_text_color(s_gallery_size, lv_color_hex(T_TEXT_MID), LV_PART_MAIN);
-    lv_obj_set_style_text_font(s_gallery_size, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_gallery_size, &lv_font_montserrat_18, LV_PART_MAIN);
     lv_label_set_text(s_gallery_size, "-- / --");
     lv_obj_align(s_gallery_size, LV_ALIGN_RIGHT_MID, -8, 0);
 
@@ -1283,7 +1283,7 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
     lv_obj_set_size(touch_label, TOUCH_LABEL_W, TOUCH_LABEL_H);
     lv_label_set_long_mode(touch_label, LV_LABEL_LONG_CLIP);
     lv_obj_set_style_text_color(touch_label, lv_color_hex(T_PRIMARY), LV_PART_MAIN);
-    lv_obj_set_style_text_font(touch_label, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(touch_label, &lv_font_montserrat_18, LV_PART_MAIN);
     lv_obj_clear_flag(touch_label, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(touch_label, LV_OBJ_FLAG_HIDDEN);
 

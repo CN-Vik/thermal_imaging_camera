@@ -89,7 +89,7 @@ const lv_font_t *lang_font_for(app_lang_t l) {
     case LANG_JA: return &app_font_ja;
     case LANG_KO: return &app_font_ko;
     case LANG_RU: return &app_font_ru;
-    default: return &lv_font_montserrat_14;
+    default: return &lv_font_montserrat_18;
     }
 }
 

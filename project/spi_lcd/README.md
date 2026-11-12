@@ -986,7 +986,7 @@ project/spi_lcd/
 | `ir_color_modes.c/.h` | ~360 | 9 种伪彩色映射函数 + 256 级 LUT 生成 + 模式名 |
 | `lang.c/.h` | ~110 | 语言状态与 NVS 持久化、字体选择 |
 | `lang_data.c` | 生成文件 | 5 语言字符串表（由 `_gen_fonts.py` 生成，**勿手改**） |
-| `app_font_zh/ja/ko/ru.c` | 生成文件 | 4 套字体子集，16 px，4 bpp（由 `_gen_fonts.py` 生成，**勿手改**） |
+| `app_font_zh/ja/ko/ru.c` | 生成文件 | 4 套字体子集，18 px，4 bpp（由 `_gen_fonts.py` 生成，**勿手改**） |
 | `boot_ui.c/.h` | ~200 | 开机 Logo（1.5 s）+ 首次开机语言选择（阻塞） |
 | `power_on_start_img.c` | 图片数组 | 280×240 开机图 RGB565 C 数组 |
 | `dev_sys.c/.h` | ~130 | 电源自锁、软件关机、自动关机定时器、重启 |
@@ -1551,13 +1551,16 @@ v4 在设置末尾新增 `reboot_cnt`。v2/v3 旧 blob 按原长度兼容读取�
 
 ### 9.2 字体子集生成（改文案必读）
 
-`_gen_fonts.py` 为 ZH/JA/KO/RU 各生成一套 16 px、4 bpp 的字体 **子集**：
+`_gen_fonts.py` 为 ZH/JA/KO/RU 各生成一套 18 px、4 bpp 的字体 **子集**：
 
 ```python
 # 换字体只改这一段（家族 + 字重），再重新运行本脚本 + 重新编译
 UI_FONT_FAMILY = "NotoSansSC"   # "NotoSansSC"(思源黑体) / "MicrosoftYaHei"(微软雅黑)
 UI_FONT_WEIGHT = "Regular"      # "Regular" / "Medium" / "Bold"
-UI_FONT_SIZE   = 16
+UI_FONT_SIZE   = 18            # 16 → 18（+2 号）
+# 英文/数字用 LVGL 内置 Montserrat，字号必须与 sdkconfig
+# CONFIG_LV_FONT_MONTSERRAT_<N> 对应
+UI_ASCII_FONT_SIZE = UI_FONT_SIZE
 
 FONT_SPECS = {
     "ZH": ("C:/Windows/Fonts/Noto Sans SC (TrueType).otf", 0, 16),
@@ -1581,7 +1584,7 @@ FONT_SPECS = {
 **结论**：
 - ❌ **不要在代码里写死中文/日文/韩文字面量**（比如 `"已用"`），这些字符不在子集里 → 显示成空白或方块
 - ✅ 需要新文案时：改 `_gen_fonts.py` 的 `STRINGS` → 重新跑脚本 → 重新编译
-- ✅ 只需要数字/英文的地方直接用 `lv_font_montserrat_14`，不占额外空间
+- ✅ 只需要数字/英文的地方直接用 `lv_font_montserrat_18`，不占额外空间
 - 脚本对 4 bpp 做了「`box_w` 补齐偶数」处理，避免行跨度不对齐导致的**文字出现横线/乱码**
 
 运行脚本（需要 Python + Pillow）：

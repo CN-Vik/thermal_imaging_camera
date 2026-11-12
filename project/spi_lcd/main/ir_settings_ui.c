@@ -151,7 +151,7 @@ static lv_obj_t *create_blue_button(lv_obj_t *parent, const char *text,
 
     lv_obj_t *label = lv_label_create(btn);
     lv_obj_set_style_text_color(label, lv_color_white(), LV_PART_MAIN);
-    lv_obj_set_style_text_font(label, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(label, &lv_font_montserrat_18, LV_PART_MAIN);
     lv_label_set_text(label, text);
     lv_obj_center(label);
     return btn;
@@ -346,7 +346,7 @@ static void add_menu_row(lv_obj_t *list, const char *text, settings_page_t page)
     lv_obj_t *arrow = lv_label_create(row);
     lv_obj_set_style_text_color(arrow, lv_color_hex(UI_BLUE), LV_PART_MAIN);
     lv_obj_set_style_text_color(arrow, lv_color_white(), LV_STATE_PRESSED);
-    lv_obj_set_style_text_font(arrow, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(arrow, &lv_font_montserrat_18, LV_PART_MAIN);
     lv_label_set_text(arrow, LV_SYMBOL_RIGHT);
     lv_obj_align(arrow, LV_ALIGN_RIGHT_MID, -12, 0);
 }
@@ -383,7 +383,7 @@ static void add_custom_menu_row(lv_obj_t *list, const char *text,
                                 lv_color_hex(danger ? UI_DANGER : UI_BLUE),
                                 LV_PART_MAIN);
     lv_obj_set_style_text_color(arrow, lv_color_white(), LV_STATE_PRESSED);
-    lv_obj_set_style_text_font(arrow, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(arrow, &lv_font_montserrat_18, LV_PART_MAIN);
     lv_label_set_text(arrow, LV_SYMBOL_RIGHT);
     lv_obj_align(arrow, LV_ALIGN_RIGHT_MID, -12, 0);
 }
@@ -453,7 +453,7 @@ static void render_color_page(void)
 
     lv_obj_t *mode_label = lv_label_create(s_body);
     lv_obj_set_style_text_color(mode_label, lv_color_hex(UI_TEXT_MID), LV_PART_MAIN);
-    lv_obj_set_style_text_font(mode_label, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(mode_label, &lv_font_montserrat_18, LV_PART_MAIN);
     lv_label_set_text(mode_label, ir_color_get_mode_name(g_ir_settings.color_mode));
     lv_obj_align(mode_label, LV_ALIGN_TOP_MID, 0, 33);
 
@@ -736,7 +736,7 @@ static void render_chart_page(void)
     for (int i = 0; i < CHART_AXIS_LBL_CNT; i++) {
         lv_obj_t *lbl = lv_label_create(s_body);
         lv_obj_set_style_text_color(lbl, lv_color_hex(UI_TEXT_MID), LV_PART_MAIN);
-        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, LV_PART_MAIN);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_18, LV_PART_MAIN);
         lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
         lv_obj_set_width(lbl, CHART_AXIS_LEFT_W - 4);
         lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
@@ -763,7 +763,7 @@ static void render_chart_page(void)
     for (int i = 0; i < CHART_AXIS_LBL_CNT; i++) {
         lv_obj_t *lbl = lv_label_create(s_body);
         lv_obj_set_style_text_color(lbl, lv_color_hex(UI_TEXT_MID), LV_PART_MAIN);
-        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, LV_PART_MAIN);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_18, LV_PART_MAIN);
         lv_obj_set_style_text_align(lbl, x_axis_align[i], LV_PART_MAIN);
         lv_obj_set_width(lbl, 40);
         lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
@@ -844,7 +844,7 @@ static void render_rotate_page(void)
 
     lv_obj_t *hint = lv_label_create(s_body);
     lv_obj_set_style_text_color(hint, lv_color_hex(UI_TEXT_MID), LV_PART_MAIN);
-    lv_obj_set_style_text_font(hint, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_18, LV_PART_MAIN);
     lv_label_set_text(hint, "Scroll to rotate 0°, 90°, 180° or 270°");
     lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -12);
 }
@@ -921,7 +921,7 @@ static void render_scale_page(void)
         lv_obj_t *checkbox = lv_checkbox_create(s_scale_box);
         lv_checkbox_set_text(checkbox, s_scale_names[i]);
         lv_obj_set_style_text_color(checkbox, lv_color_hex(UI_TEXT_DARK), LV_PART_MAIN);
-        lv_obj_set_style_text_font(checkbox, &lv_font_montserrat_14, LV_PART_MAIN);
+        lv_obj_set_style_text_font(checkbox, &lv_font_montserrat_18, LV_PART_MAIN);
         lv_obj_set_style_radius(checkbox, LV_RADIUS_CIRCLE, LV_PART_INDICATOR);
         lv_obj_set_style_border_width(checkbox, 2, LV_PART_INDICATOR);
         lv_obj_set_style_border_color(checkbox, lv_color_hex(UI_BLUE),
@@ -1010,7 +1010,7 @@ static void render_screen_page(void)
     lv_obj_set_style_text_align(s_sleep_value, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_obj_set_style_text_color(s_sleep_value, lv_color_hex(UI_TEXT_DARK),
                                 LV_PART_MAIN);
-    lv_obj_set_style_text_font(s_sleep_value, &lv_font_montserrat_14,
+    lv_obj_set_style_text_font(s_sleep_value, &lv_font_montserrat_18,
                                LV_PART_MAIN);
     lv_label_set_text_fmt(s_sleep_value, "%04d min",
                           g_ir_settings.auto_sleep_min);
@@ -1022,7 +1022,7 @@ static void render_screen_page(void)
 
     lv_obj_t *hint = lv_label_create(s_body);
     lv_obj_set_style_text_color(hint, lv_color_hex(UI_TEXT_MID), LV_PART_MAIN);
-    lv_obj_set_style_text_font(hint, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_18, LV_PART_MAIN);
     lv_label_set_text(hint, "0 min disables auto power off");
     lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -10);
 }
@@ -1132,7 +1132,7 @@ static void render_emissivity_page(void)
 
     lv_obj_t *hint = lv_label_create(s_body);
     lv_obj_set_style_text_color(hint, lv_color_hex(UI_TEXT_MID), LV_PART_MAIN);
-    lv_obj_set_style_text_font(hint, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_18, LV_PART_MAIN);
     lv_label_set_text(hint, "Typical skin / water: 0.95 - 0.98");
     lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -12);
 }
@@ -1181,7 +1181,7 @@ static void render_gamma_page(void)
 
     lv_obj_t *hint = lv_label_create(s_body);
     lv_obj_set_style_text_color(hint, lv_color_hex(UI_TEXT_MID), LV_PART_MAIN);
-    lv_obj_set_style_text_font(hint, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_18, LV_PART_MAIN);
     lv_label_set_text(hint, "Lower values reveal cooler details");
     lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -12);
 }
@@ -1215,7 +1215,7 @@ static void render_calibration_page(void)
 
     lv_obj_t *hint = lv_label_create(s_body);
     lv_obj_set_style_text_color(hint, lv_color_hex(UI_TEXT_MID), LV_PART_MAIN);
-    lv_obj_set_style_text_font(hint, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_18, LV_PART_MAIN);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_obj_set_width(hint, 240);
     lv_label_set_text(hint, "Apply a reference-temperature offset\nfor every displayed reading.");
@@ -1317,7 +1317,7 @@ static void render_language_page(void)
 
         if (selected) {
             lv_obj_t *check = lv_label_create(row);
-            lv_obj_set_style_text_font(check, &lv_font_montserrat_14, LV_PART_MAIN);
+            lv_obj_set_style_text_font(check, &lv_font_montserrat_18, LV_PART_MAIN);
             lv_obj_set_style_text_color(check, lv_color_white(), LV_PART_MAIN);
             lv_label_set_text(check, LV_SYMBOL_OK);
             lv_obj_align(check, LV_ALIGN_RIGHT_MID, -16, 0);
@@ -1356,7 +1356,7 @@ static void render_factory_reset_page(void)
 
     lv_obj_t *hint = lv_label_create(s_body);
     lv_obj_set_style_text_color(hint, lv_color_hex(UI_DANGER), LV_PART_MAIN);
-    lv_obj_set_style_text_font(hint, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_18, LV_PART_MAIN);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_label_set_text(hint,
                       "Reset all display settings, calibration,\n"
@@ -1385,14 +1385,14 @@ static void render_about_page(void)
 
     lv_obj_t *title = lv_label_create(s_body);
     lv_obj_set_style_text_color(title, lv_color_hex(UI_TEXT_DARK), LV_PART_MAIN);
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_18, LV_PART_MAIN);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_label_set_text(title, "RT Thermal Camera V2.3");
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 49);
 
     lv_obj_t *version = lv_label_create(s_body);
     lv_obj_set_style_text_color(version, lv_color_hex(UI_TEXT_MID), LV_PART_MAIN);
-    lv_obj_set_style_text_font(version, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(version, &lv_font_montserrat_18, LV_PART_MAIN);
     lv_obj_set_style_text_align(version, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_label_set_text(version,
                       "LVGL 8  |  280 x 240 Landscape\n"
@@ -1531,7 +1531,7 @@ void ir_settings_ui_create(lv_obj_t *parent)
 
     lv_obj_t *back = lv_label_create(s_header);
     lv_obj_set_style_text_color(back, lv_color_white(), LV_PART_MAIN);
-    lv_obj_set_style_text_font(back, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(back, &lv_font_montserrat_18, LV_PART_MAIN);
     lv_label_set_text(back, LV_SYMBOL_LEFT);
     lv_obj_center(back);
 
