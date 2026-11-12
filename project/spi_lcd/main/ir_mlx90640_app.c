@@ -116,12 +116,15 @@ ir_app_settings_t g_ir_settings = {
  * - AUTO_RANGE_MIN_SPAN_C 设为 10.0℃，防止无热源时把 5℃ 的背景底噪拉伸成满屏花斑
  * - AUTO_RANGE_HIGHLIGHT_HEADROOM_C 预留 1.3℃ 顶部余量，防止手掌核心区过曝惨白
  */
-#define AUTO_RANGE_MIN_SPAN_C           10.0f
+/*想让 26~27℃ 的弱热源颜色更夸张：
+把 AUTO_RANGE_MIN_SPAN_C 从 3.8f 改小到 2.8f 或 3.0f。值越小，
+微弱温差的颜色对比越强烈。*/
+#define AUTO_RANGE_MIN_SPAN_C           2.8f 
 #define AUTO_RANGE_LOW_PADDING_C        0.4f
 #define AUTO_RANGE_HIGHLIGHT_HEADROOM_C 1.3f
 #define AUTO_RANGE_ALPHA                0.04f
 #define THERMAL_PERCENTILE_LOW           5
-#define THERMAL_PERCENTILE_HIGH          95
+#define THERMAL_PERCENTILE_HIGH          99
 
 /* 降发热优化：正常显示保持 16Hz（流畅度不变），仅热像被遮挡/息屏时降频降耗。
  *  - 设置菜单/调色板/相册/照片查看器 -> 4Hz（功耗约 15mA，退出恢复快）
@@ -1079,25 +1082,35 @@ static void temperature_to_norm_u8(const float *src, uint8_t *dst,
     float map_max = THERMAL_USE_AUTO_RANGE ? smooth_max_t : THERMAL_FIXED_MAX_C;
 
     float delta = map_max - map_min;
-    if (delta < 2.0f) {
-        delta = 2.0f;
+    if (delta < 1.5f) {
+        delta = 1.5f;
     }
 
     float range_inv = 1.0f / delta;
-    float gamma = clampf_local(g_ir_settings.gamma, 0.5f, 3.0f);
-    bool use_default_gamma = (fabsf(gamma - 1.5f) < 0.01f);
+    /* 将用户设置的 gamma 基准转换：默认 1.5 时映射为 0.75 的热源提亮指数 */
+    float user_gamma = clampf_local(g_ir_settings.gamma, 0.5f, 3.0f);
+    float heat_gamma = clampf_local(user_gamma * 0.5f, 0.45f, 1.5f);
+    bool use_fast_curve = (fabsf(user_gamma - 1.5f) < 0.05f);
+
+    /* 底部 12% 设为环境底噪门限（约 0.45℃），低于门限压暗背景，高于门限快速显色 */
+    /*对着纯白墙面时如果觉得背景有零星彩色噪点：把 temperature_to_norm_u8 里的 
+    noise_gate 从 0.12f 调大到 0.18f，即可把背景底噪全部按回深色区*/
+    const float noise_gate = 0.175f;
+    const float inv_above_gate = 1.0f / (1.0f - noise_gate);
 
     for (int i = 0; i < MLX_RAW_PIXELS; i++) {
         float norm = (src[i] - map_min) * range_inv;
         norm = clampf_local(norm, 0.0f, 1.0f);
 
-        /*
-         * 恢复原版温和对比度曲线 (0.65 * norm^gamma + 0.35 * norm)：
-         * 默认 gamma=1.5 时使用快速 norm * sqrtf(norm)，与 origin_ir_mlx90640_app.c 完全一致；
-         * 既压低背景暗部噪点，又保留手掌高温区和边缘的细节层次。
-         */
-        float gamma_curve = use_default_gamma ? (norm * sqrtf(norm)) : powf(norm, gamma);
-        norm = 0.65f * gamma_curve + 0.35f * norm;
+        if (norm <= noise_gate) {
+            /* 环境背景区：压在色表底部 0~4% 的深色区，保持背景干净 */
+            norm = (norm / noise_gate) * 0.04f;
+        } else {
+            /* 热源区：跨过门限后迅速拉升色阶，温度越高颜色越明显 */
+            float t = (norm - noise_gate) * inv_above_gate;
+            float boosted = use_fast_curve ? sqrtf(t) : powf(t, heat_gamma);
+            norm = 0.04f + 0.96f * (0.55f * boosted + 0.45f * t);
+        }
 
         dst[i] = (uint8_t)(norm * 255.0f + 0.5f);
     }
@@ -1302,8 +1315,6 @@ void ir_camera_task_main(void *pvParameters)
             }
 
 #if THERMAL_USE_AUTO_RANGE
-            // 用 5%/95% 分位数决定颜色映射范围，避免单个异常像素拉伸整幅图像。
-            // median_temp 可复用为排序工作区；spatial_temp 保留原始滤波图用于显示和测温。
             int n_valid = 0;
             for (int i = 0; i < MLX_RAW_PIXELS; i++) {
                 float t = spatial_temp[i];
@@ -1320,10 +1331,12 @@ void ir_camera_task_main(void *pvParameters)
                 robust_max = median_temp[(n_valid - 1) * THERMAL_PERCENTILE_HIGH / 100];
             }
 
-            float target_min = robust_min - AUTO_RANGE_LOW_PADDING_C;
-            float target_max = robust_max + AUTO_RANGE_HIGHLIGHT_HEADROOM_C;
+            /* 融合真实极值 cur_max 与 99% 分位数，确保小面积热源也能撑开色彩映射 */
+            float hot_ref = 0.60f * cur_max + 0.40f * robust_max;
 
-            // 当画面中没有高温物体（温差小于 10℃）时，优先向下扩展量程上限，将背景固定在深蓝暗部
+            float target_min = robust_min - AUTO_RANGE_LOW_PADDING_C;
+            float target_max = hot_ref + AUTO_RANGE_HIGHLIGHT_HEADROOM_C;
+
             if ((target_max - target_min) < AUTO_RANGE_MIN_SPAN_C) {
                 target_max = target_min + AUTO_RANGE_MIN_SPAN_C;
             }
@@ -1333,8 +1346,10 @@ void ir_camera_task_main(void *pvParameters)
                 smooth_max_t = target_max;
                 range_initialized = true;
             } else {
+                /* 发现热源升温时快速跟进 (0.25)，移开热源时平滑回落 (AUTO_RANGE_ALPHA) */
+                float alpha_max = (target_max > smooth_max_t) ? 0.25f : AUTO_RANGE_ALPHA;
                 smooth_min_t += AUTO_RANGE_ALPHA * (target_min - smooth_min_t);
-                smooth_max_t += AUTO_RANGE_ALPHA * (target_max - smooth_max_t);
+                smooth_max_t += alpha_max * (target_max - smooth_max_t);
             }
 #endif
 
