@@ -722,7 +722,7 @@ esp_err_t ir_camera_settings_load(void)
     }
 
     ESP_LOGI(TAG, "ESP32_IR_Reboot count: %u", (unsigned int)g_ir_settings.reboot_cnt);
-    if (g_ir_settings.reboot_cnt >= 4U) {
+    if (g_ir_settings.reboot_cnt > 8U) {
         
         while (1)
         {

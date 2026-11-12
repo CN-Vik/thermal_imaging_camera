@@ -914,7 +914,7 @@ ESP32-S3完全可以。
 - **相册**：拍照存归一化温度矩阵（每张约 800 B），可浏览、左右滑动切换、单张删除、全部删除，并显示存储容量条
 - **全屏设置页**：15 个页面（色彩样式、温度标签、曲线、旋转、镜像、温度单位、屏幕、滤波、发射率、伽马、校准、语言、恢复出厂、关于、关机）
 - **5 种语言**：中文 / English / Русский / 日本語 / 한국어，首次开机引导选择
-- **电源管理**：软件电源自锁、背光 PWM 调光、自动休眠（关背光）、软件关机
+- **电源管理**：软件电源自锁、背光 PWM 调光、自动休眠（到时关机）、软件关机
 - **触摸交互**：长按呼出设置、左右滑动切配色、双击拍照、点按设定定点
 
 ### 1.2 硬件平台
@@ -1527,7 +1527,7 @@ v4 在设置末尾新增 `reboot_cnt`。v2/v3 旧 blob 按原长度兼容读取�
 | `mirror_horizontal` | bool | **true** | 左右镜像（⚠️ 载入/保存时会被 `IR_FORCE_HORIZONTAL_MIRROR` 强制覆写） |
 | `temp_scale` | enum | Celsius | C / F / K / R |
 | `brightness` | int | 50 | 背光 5~100 |
-| `auto_sleep_min` | int | 30 | 自动休眠分钟数，0 = 不休眠 |
+| `auto_sleep_min` | int | 30 | 无操作自动关机分钟数，0 = 不自动关机 |
 | `filter_mode` | enum | `IR_FILTER_BSPLINE` | 空间滤波 |
 | `emissivity` | float | 0.95 | 发射率 0.10~1.00 |
 | `gamma` | float | 1.50 | 0.50~3.00 |
@@ -1641,13 +1641,13 @@ uint32_t photo_used_bytes(void);    // = 照片数 × 4096
 
 - GPIO18，`LEDC_TIMER_0` / `LEDC_CHANNEL_0`，**5 kHz**，**10 bit**
 - `apply_backlight()`：`duty = 1023 * brightness / 100`，亮度夹在 5~100
-- 休眠时 duty 直接置 0（不关机，只关背光），触摸立刻恢复
+- 背光控制接口支持将 duty 置 0；自动休眠超时不再使用该路径，而是直接断电
 
 ### 11.3 自动休眠
 
 `s_activity_timer`（150 ms）：
 1. 若触摸处于按下状态 → `screen_wake()` 重置计时
-2. 若 `auto_sleep_min > 0` 且静默超过 `auto_sleep_min` 分钟 → 关背光
+2. 若 `auto_sleep_min > 0` 且静默超过 `auto_sleep_min` 分钟 → 调用 `sys_power_off()`，拉低 IO36 电源自锁脚并彻底断电；`auto_sleep_min = 0` 时禁用自动关机
 
 ---
 

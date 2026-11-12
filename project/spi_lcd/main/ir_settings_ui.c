@@ -996,7 +996,7 @@ static void render_screen_page(void)
     lv_obj_align(sleep, LV_ALIGN_TOP_MID, 0, 89);
 
     lv_obj_t *minus = create_blue_button(s_body, LV_SYMBOL_MINUS, 44, 38,
-                                         sleep_event_cb, (void *)(intptr_t)-5);
+                                         sleep_event_cb, (void *)(intptr_t)-1);
     lv_obj_align(minus, LV_ALIGN_TOP_MID, -68, 114);
 
     s_sleep_value = lv_label_create(s_body);
@@ -1017,7 +1017,7 @@ static void render_screen_page(void)
     lv_obj_align(s_sleep_value, LV_ALIGN_TOP_MID, 0, 114);
 
     lv_obj_t *plus = create_blue_button(s_body, LV_SYMBOL_PLUS, 44, 38,
-                                        sleep_event_cb, (void *)(intptr_t)5);
+                                        sleep_event_cb, (void *)(intptr_t)1);
     lv_obj_align(plus, LV_ALIGN_TOP_MID, 68, 114);
 
     lv_obj_t *hint = lv_label_create(s_body);
@@ -1387,7 +1387,7 @@ static void render_about_page(void)
     lv_obj_set_style_text_color(title, lv_color_hex(UI_TEXT_DARK), LV_PART_MAIN);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-    lv_label_set_text(title, "RT Thermal Camera V2.1");
+    lv_label_set_text(title, "RT Thermal Camera V2.3");
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 49);
 
     lv_obj_t *version = lv_label_create(s_body);
@@ -1454,8 +1454,7 @@ static void activity_timer_cb(lv_timer_t *timer)
         uint32_t timeout_ms =
             (uint32_t)g_ir_settings.auto_sleep_min * 60U * 1000U;
         if (lv_tick_elaps(s_last_activity_ms) >= timeout_ms) {
-            s_screen_sleeping = true;
-            apply_backlight();
+            sys_power_off();
         }
     }
 }
