@@ -1387,7 +1387,7 @@ static void render_about_page(void)
     lv_obj_set_style_text_color(title, lv_color_hex(UI_TEXT_DARK), LV_PART_MAIN);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_18, LV_PART_MAIN);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-    lv_label_set_text(title, "RT Thermal Camera V2.3");
+    lv_label_set_text(title, "RT Thermal Camera V2.4");
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 49);
 
     lv_obj_t *version = lv_label_create(s_body);
