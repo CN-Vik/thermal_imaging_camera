@@ -123,6 +123,8 @@ ir_app_settings_t g_ir_settings = {
 #define AUTO_RANGE_LOW_PADDING_C        0.4f
 #define AUTO_RANGE_HIGHLIGHT_HEADROOM_C 1.3f
 #define AUTO_RANGE_ALPHA                0.04f
+#define AUTO_RANGE_FALL_ALPHA           0.30f
+#define AUTO_RANGE_RISE_ALPHA           0.25f
 #define THERMAL_PERCENTILE_LOW           5
 #define THERMAL_PERCENTILE_HIGH          99
 
@@ -1346,9 +1348,12 @@ void ir_camera_task_main(void *pvParameters)
                 smooth_max_t = target_max;
                 range_initialized = true;
             } else {
-                /* 发现热源升温时快速跟进 (0.25)，移开热源时平滑回落 (AUTO_RANGE_ALPHA) */
-                float alpha_max = (target_max > smooth_max_t) ? 0.25f : AUTO_RANGE_ALPHA;
-                smooth_min_t += AUTO_RANGE_ALPHA * (target_min - smooth_min_t);
+                /* 降温时快速下移色阶，避免高温场景结束后低温画面长时间发暗。 */
+                float alpha_min = (target_min < smooth_min_t)
+                                ? AUTO_RANGE_FALL_ALPHA : AUTO_RANGE_ALPHA;
+                float alpha_max = (target_max < smooth_max_t)
+                                ? AUTO_RANGE_FALL_ALPHA : AUTO_RANGE_RISE_ALPHA;
+                smooth_min_t += alpha_min * (target_min - smooth_min_t);
                 smooth_max_t += alpha_max * (target_max - smooth_max_t);
             }
 #endif
