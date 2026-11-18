@@ -33,6 +33,11 @@ TaskHandle_t ir_task_Handle = NULL;
 #define IR_SETTINGS_NVS_KEY       "app"
 #define IR_SETTINGS_MAGIC         0x49525354U
 #define IR_SETTINGS_VERSION       4U
+#define IR_TEMP_MIN_VALID_C       (-40.0f)
+#define IR_TEMP_MAX_VALID_C       300.0f
+#define IR_TEMP_CAL_ANCHOR_C      30.0f
+#define IR_TEMP_CAL_SENSOR_HIGH_C 92.675f
+#define IR_TEMP_CAL_REFERENCE_C   100.0f
 
 typedef struct {
     uint32_t magic;
@@ -212,6 +217,24 @@ static inline int clamp_int_local(int v, int lo, int hi)
     return v;
 }
 
+static inline bool ir_temperature_is_valid(float temp_c)
+{
+    return isfinite(temp_c) &&
+           temp_c >= IR_TEMP_MIN_VALID_C &&
+           temp_c <= IR_TEMP_MAX_VALID_C;
+}
+
+static inline float ir_temperature_calibrate(float temp_c)
+{
+    if (!ir_temperature_is_valid(temp_c) || temp_c <= IR_TEMP_CAL_ANCHOR_C) {
+        return temp_c;
+    }
+
+    const float gain = (IR_TEMP_CAL_REFERENCE_C - IR_TEMP_CAL_ANCHOR_C) /
+                       (IR_TEMP_CAL_SENSOR_HIGH_C - IR_TEMP_CAL_ANCHOR_C);
+    return IR_TEMP_CAL_ANCHOR_C + (temp_c - IR_TEMP_CAL_ANCHOR_C) * gain;
+}
+
 /*
  * 1. 分场时域滤波 + 防趾蹼动态消交错
  *    - 阶段 A：仅对本帧新测量的 subpage 像素做连续自适应 IIR 时域降噪
@@ -233,7 +256,10 @@ static void update_temporal_and_deinterlace(const float *raw_src, float *filt_st
             float raw_v = raw_src[idx];
             float prev_v = filt_state[idx];
 
-            if (prev_v < 1.0f || !isfinite(prev_v)) {
+            if (!ir_temperature_is_valid(raw_v)) {
+                continue;
+            }
+            if (!ir_temperature_is_valid(prev_v)) {
                 filt_state[idx] = raw_v;
                 continue;
             }
@@ -272,10 +298,7 @@ static void update_temporal_and_deinterlace(const float *raw_src, float *filt_st
             float n2 = filt_state[r * w + c_prev];
             float n3 = filt_state[r * w + c_next];
 
-            if (val < 1.0f || !isfinite(val)) {
-                filt_state[idx] = 0.25f * (n0 + n1 + n2 + n3);
-                continue;
-            }
+            if (!ir_temperature_is_valid(val)) continue;
 
             // 快速排序网络: n0 <= n1 <= n2 <= n3
             if (n0 > n1) { float t = n0; n0 = n1; n1 = t; }
@@ -334,7 +357,7 @@ static void spatial_median_outlier_filter(const float *src, float *dst, int w, i
                     if (cc >= w) cc = w - 1;
 
                     float t = src[rr * w + cc];
-                    if (isfinite(t) && t > 1.0f && t < 200.0f) {
+                    if (ir_temperature_is_valid(t)) {
                         v[n++] = t;
                     }
                 }
@@ -342,7 +365,7 @@ static void spatial_median_outlier_filter(const float *src, float *dst, int w, i
 
             int idx = r * w + c;
             float center = src[idx];
-            if (!isfinite(center) || center <= 1.0f || center >= 200.0f || n < 5) {
+            if (!ir_temperature_is_valid(center) || n < 5) {
                 dst[idx] = center;
                 continue;
             }
@@ -429,6 +452,32 @@ static void select_nth_float(float *values, int count, int nth)
     }
 }
 
+static float max_valid_temperature(const float *values)
+{
+    float max_temp = IR_TEMP_MIN_VALID_C;
+    for (int i = 0; i < MLX_RAW_PIXELS; i++) {
+        float value = values[i];
+        if (ir_temperature_is_valid(value) &&
+            value > max_temp) {
+            max_temp = value;
+        }
+    }
+    return max_temp;
+}
+
+static float min_valid_temperature(const float *values)
+{
+    float min_temp = IR_TEMP_MAX_VALID_C;
+    for (int i = 0; i < MLX_RAW_PIXELS; i++) {
+        float value = values[i];
+        if (ir_temperature_is_valid(value) &&
+            value < min_temp) {
+            min_temp = value;
+        }
+    }
+    return min_temp;
+}
+
 /*
  * 3. 防指缝漏热的 3x3 双边保边平滑滤波
  *    - 平坦区消除固定图案噪声 (FPN) 与奇偶微差
@@ -449,6 +498,10 @@ static void spatial_bilateral_denoise(const float *src, float *dst, int w, int h
             int c_next = (c < w - 1) ? (c + 1) : c;
 
             float center = src[r * w + c];
+            if (!ir_temperature_is_valid(center)) {
+                dst[r * w + c] = center;
+                continue;
+            }
 
             // 正交 4 邻域
             float ortho[4] = {
@@ -467,8 +520,9 @@ static void spatial_bilateral_denoise(const float *src, float *dst, int w, int h
             };
 
             // 计算正交邻域极差，判断当前是否处于平坦区
-            float o_min = ortho[0], o_max = ortho[0];
-            for (int i = 1; i < 4; i++) {
+            float o_min = center, o_max = center;
+            for (int i = 0; i < 4; i++) {
+                if (!ir_temperature_is_valid(ortho[i])) continue;
                 if (ortho[i] < o_min) o_min = ortho[i];
                 if (ortho[i] > o_max) o_max = ortho[i];
             }
@@ -476,8 +530,17 @@ static void spatial_bilateral_denoise(const float *src, float *dst, int w, int h
 
             // 仅在非边缘/非指缝的平坦区域（ortho_span < 1.0℃）消除中心点与正交邻域的静态奇偶微差
             if (ortho_span < 1.0f) {
-                float ortho_avg = 0.25f * (ortho[0] + ortho[1] + ortho[2] + ortho[3]);
-                if (fabsf(center - ortho_avg) < 0.80f) {
+                float ortho_sum = 0.0f;
+                int ortho_count = 0;
+                for (int i = 0; i < 4; i++) {
+                    if (ir_temperature_is_valid(ortho[i])) {
+                        ortho_sum += ortho[i];
+                        ortho_count++;
+                    }
+                }
+                float ortho_avg = ortho_count > 0
+                                ? ortho_sum / (float)ortho_count : center;
+                if (ortho_count > 0 && fabsf(center - ortho_avg) < 0.80f) {
                     center = 0.65f * center + 0.35f * ortho_avg;
                 }
             }
@@ -486,30 +549,34 @@ static void spatial_bilateral_denoise(const float *src, float *dst, int w, int h
             float w_total = 4.0f;
 
             for (int i = 0; i < 4; i++) {
-                // 正交邻居：如果邻居比中心点热且处于有梯度的区域（如手指高于指缝），使用 0.65℃ 严苛阈值阻断漏热
-                float diff_o = ortho[i] - center;
-                float d_o = fabsf(diff_o);
-                float thresh_o = (diff_o > 0.0f && ortho_span >= 0.90f)
-                                 ? edge_thresh_hot_bleed
-                                 : edge_thresh_flat;
-                if (d_o < thresh_o) {
-                    float t = 1.0f - (d_o / thresh_o);
-                    float w_o = 2.0f * t * t;
-                    sum_smooth += ortho[i] * w_o;
-                    w_total += w_o;
+                if (ir_temperature_is_valid(ortho[i])) {
+                    // 正交邻居：如果邻居比中心点热且处于有梯度的区域（如手指高于指缝），使用 0.65℃ 严苛阈值阻断漏热
+                    float diff_o = ortho[i] - center;
+                    float d_o = fabsf(diff_o);
+                    float thresh_o = (diff_o > 0.0f && ortho_span >= 0.90f)
+                                     ? edge_thresh_hot_bleed
+                                     : edge_thresh_flat;
+                    if (d_o < thresh_o) {
+                        float t = 1.0f - (d_o / thresh_o);
+                        float w_o = 2.0f * t * t;
+                        sum_smooth += ortho[i] * w_o;
+                        w_total += w_o;
+                    }
                 }
 
                 // 对角邻居：同样阻止高温对角像素向低温指缝漏热
-                float diff_d = diag[i] - center;
-                float d_d = fabsf(diff_d);
-                float thresh_d = (diff_d > 0.0f && ortho_span >= 0.90f)
-                                 ? edge_thresh_hot_bleed
-                                 : edge_thresh_flat;
-                if (d_d < thresh_d) {
-                    float t = 1.0f - (d_d / thresh_d);
-                    float w_d = 1.0f * t * t;
-                    sum_smooth += diag[i] * w_d;
-                    w_total += w_d;
+                if (ir_temperature_is_valid(diag[i])) {
+                    float diff_d = diag[i] - center;
+                    float d_d = fabsf(diff_d);
+                    float thresh_d = (diff_d > 0.0f && ortho_span >= 0.90f)
+                                     ? edge_thresh_hot_bleed
+                                     : edge_thresh_flat;
+                    if (d_d < thresh_d) {
+                        float t = 1.0f - (d_d / thresh_d);
+                        float w_d = 1.0f * t * t;
+                        sum_smooth += diag[i] * w_d;
+                        w_total += w_d;
+                    }
                 }
             }
 
@@ -543,7 +610,7 @@ static void spatial_gaussian_denoise(const float *src, float *dst, int w, int h)
                     if (cc >= w) cc = w - 1;
 
                     float value = src[rr * w + cc];
-                    if (!isfinite(value) || value <= 1.0f || value >= 200.0f) {
+                    if (!ir_temperature_is_valid(value)) {
                         continue;
                     }
 
@@ -1058,7 +1125,7 @@ void ir_camera_chart_clear(void)
 
 static void ir_camera_chart_push(float temp_c)
 {
-    if (!isfinite(temp_c) || temp_c <= 1.0f || temp_c >= 200.0f) return;
+    if (!ir_temperature_is_valid(temp_c)) return;
 
     portENTER_CRITICAL(&s_chart_mux);
     s_chart_buf[s_chart_head] = temp_c;
@@ -1131,6 +1198,10 @@ static void temperature_to_norm_u8(const float *src, uint8_t *dst,
     const float inv_above_gate = 1.0f / (1.0f - noise_gate);
 
     for (int i = 0; i < MLX_RAW_PIXELS; i++) {
+        if (!ir_temperature_is_valid(src[i])) {
+            dst[i] = 0;
+            continue;
+        }
         float norm = (src[i] - map_min) * range_inv;
         norm = clampf_local(norm, 0.0f, 1.0f);
 
@@ -1195,10 +1266,32 @@ void ir_camera_task_main(void *pvParameters)
         return;
     }
 
-    MLX90640_DumpEE(MLX90640_ADDR, eerom_ir_data);
-    MLX90640_ExtractParameters(eerom_ir_data, mlx_params);
+    int ee_status = MLX90640_DumpEE(MLX90640_ADDR, eerom_ir_data);
+    if (ee_status != 0) {
+        ESP_LOGE(TAG, "Failed to read MLX90640 calibration EEPROM: %d", ee_status);
+        vTaskDelete(NULL);
+        return;
+    }
+    int params_status = MLX90640_ExtractParameters(eerom_ir_data, mlx_params);
+    if (params_status < 0) {
+        ESP_LOGE(TAG, "Invalid MLX90640 calibration data, bad pixel count: %d",
+                 -params_status);
+        vTaskDelete(NULL);
+        return;
+    }
+    ESP_LOGI(TAG, "MLX90640 calibration data loaded (bad pixels: %d)",
+             params_status);
     free(eerom_ir_data);
     eerom_ir_data = NULL;
+    ESP_LOGI(TAG, "Temperature settings: emissivity=%.2f offset=%+.1fC TaShift=%dC",
+             (double)g_ir_settings.emissivity,
+             (double)g_ir_settings.temperature_offset_c, TA_SHIFT);
+    ESP_LOGI(TAG,
+             "Device temperature calibration: hot %.1fC->%.1fC, %.3fC->%.1fC; cold range unadjusted",
+             (double)IR_TEMP_CAL_ANCHOR_C,
+             (double)IR_TEMP_CAL_ANCHOR_C,
+             (double)IR_TEMP_CAL_SENSOR_HIGH_C,
+             (double)IR_TEMP_CAL_REFERENCE_C);
 
     ESP_LOGI(TAG, "Warming up MLX90640 sensor...");
     for (int i = 0; i < 4; i++) {
@@ -1215,6 +1308,7 @@ void ir_camera_task_main(void *pvParameters)
     uint32_t frame_count = 0;
     float real_fps = 0.0f;
     int64_t last_time_us = esp_timer_get_time();
+    int64_t last_temp_diag_us = last_time_us;
     int64_t last_chart_us = 0;
 
     float smooth_min_t = THERMAL_FIXED_MIN_C;
@@ -1224,6 +1318,7 @@ void ir_camera_task_main(void *pvParameters)
     bool range_initialized = false;
 
     bool subpage_init[2] = {false, false};
+    bool temperature_initialized = false;
     bool ui_was_blocked = false;
     int  resync_left = 0;
 
@@ -1296,6 +1391,7 @@ void ir_camera_task_main(void *pvParameters)
                 /* 丢弃遮挡前残留的半帧，两个子场都刷新成新数据后再显示 */
                 if (--resync_left == 0) {
                     memcpy(filtered_temp, raw_temp_matrix, MLX_RAW_PIXELS * sizeof(float));
+                    temperature_initialized = true;
                     range_initialized = false;   /* 让自动量程重新平滑，避免色阶跳变 */
                 }
                 ESP_ERROR_CHECK(esp_pm_lock_release(cpu_freq_lock));
@@ -1304,8 +1400,15 @@ void ir_camera_task_main(void *pvParameters)
             }
 
             if (!subpage_init[0] || !subpage_init[1]) {
-                // 首轮先将 raw_temp_matrix 同步到 filtered_temp
+                ESP_ERROR_CHECK(esp_pm_lock_release(cpu_freq_lock));
+                vTaskDelay(pdMS_TO_TICKS(2));
+                continue;
+            }
+
+            if (!temperature_initialized) {
+                /* 等两个子场都采到数据后初始化，避免把0℃当成未初始化标记。 */
                 memcpy(filtered_temp, raw_temp_matrix, MLX_RAW_PIXELS * sizeof(float));
+                temperature_initialized = true;
                 ESP_ERROR_CHECK(esp_pm_lock_release(cpu_freq_lock));
                 vTaskDelay(pdMS_TO_TICKS(2));
                 continue;
@@ -1319,9 +1422,32 @@ void ir_camera_task_main(void *pvParameters)
             spatial_median_outlier_filter(filtered_temp, median_temp,
                                           MLX_RAW_W, MLX_RAW_H);
 
+            bool temperature_diag_due =
+                esp_timer_get_time() - last_temp_diag_us >= 1000000;
+            float raw_stage_max = IR_TEMP_MIN_VALID_C;
+            float temporal_stage_max = IR_TEMP_MIN_VALID_C;
+            float median_stage_max = IR_TEMP_MIN_VALID_C;
+            float raw_stage_min = IR_TEMP_MAX_VALID_C;
+            float temporal_stage_min = IR_TEMP_MAX_VALID_C;
+            float median_stage_min = IR_TEMP_MAX_VALID_C;
+            if (temperature_diag_due) {
+                raw_stage_max = max_valid_temperature(raw_temp_matrix);
+                temporal_stage_max = max_valid_temperature(filtered_temp);
+                median_stage_max = max_valid_temperature(median_temp);
+                raw_stage_min = min_valid_temperature(raw_temp_matrix);
+                temporal_stage_min = min_valid_temperature(filtered_temp);
+                median_stage_min = min_valid_temperature(median_temp);
+            }
+
             // 4. 按设置页选择的滤波算法生成最终的测温/显示矩阵（默认与原版双边滤波完全一致）
             apply_spatial_filter(filtered_temp, median_temp, spatial_temp,
                                  (int)g_ir_settings.filter_mode);
+
+            for (int i = 0; i < MLX_RAW_PIXELS; i++) {
+                if (ir_temperature_is_valid(spatial_temp[i])) {
+                    spatial_temp[i] = ir_temperature_calibrate(spatial_temp[i]);
+                }
+            }
 
             /* 出厂校准偏移叠加到最终输出，不破坏原始滤波状态。 */
             float calibration_offset = g_ir_settings.temperature_offset_c;
@@ -1334,15 +1460,15 @@ void ir_camera_task_main(void *pvParameters)
             }
 
             // 5. 统计极值
-            float cur_min = 200.0f;
-            float cur_max = -50.0f;
+            float cur_min = IR_TEMP_MAX_VALID_C;
+            float cur_max = IR_TEMP_MIN_VALID_C;
             int max_idx = 0;
             int min_idx = 0;
             int valid_pts = 0;
 
             for (int i = 0; i < MLX_RAW_PIXELS; i++) {
                 float val = spatial_temp[i];
-                if (val > 1.0f && val < 200.0f && isfinite(val)) {
+                if (ir_temperature_is_valid(val)) {
                     if (val < cur_min) { cur_min = val; min_idx = i; }
                     if (val > cur_max) { cur_max = val; max_idx = i; }
                     median_temp[valid_pts++] = val;
@@ -1429,6 +1555,17 @@ void ir_camera_task_main(void *pvParameters)
             float disp_min = ir_camera_convert_temp(cur_min, NULL);
             float disp_record = ir_camera_convert_temp(record_t, NULL);
             float disp_dt = disp_max - disp_min;
+
+            if (temperature_diag_due) {
+                ESP_LOGI(TAG,
+                         "Temperature stages min: raw=%.1f temporal=%.1f median=%.1f final=%.1fC; max: raw=%.1f temporal=%.1f median=%.1f final=%.1fC; Ta=%.1f Tr=%.1fC",
+                         (double)raw_stage_min, (double)temporal_stage_min,
+                         (double)median_stage_min, (double)cur_min,
+                         (double)raw_stage_max, (double)temporal_stage_max,
+                         (double)median_stage_max, (double)cur_max,
+                         (double)smooth_ta, (double)(smooth_ta - TA_SHIFT));
+                last_temp_diag_us = now_us;
+            }
 
             snprintf(text_fps, sizeof(text_fps), "%.1f FPS", real_fps);
             snprintf(text_info, sizeof(text_info),
