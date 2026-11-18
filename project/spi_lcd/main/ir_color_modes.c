@@ -1,4 +1,5 @@
 #include "ir_color_modes.h"
+#include <stddef.h>
 
 /**
  * 内部归一化与对比度重映射：
@@ -30,6 +31,33 @@ static float normalize_temperature(float val, float min_t, float max_t)
     norm = (norm - lo_clip) / (hi_clip - lo_clip);
     // 轻度 S 曲线增强明暗对比
     return norm * norm * (3.0f - 2.0f * norm);
+}
+
+typedef struct
+{
+    uint8_t r;
+    uint8_t g;
+    uint8_t b;
+} ir_color_stop_t;
+
+static uint16_t interpolate_palette(float norm, const ir_color_stop_t *stops,
+                                    size_t stop_count)
+{
+    float scaled = norm * (float)(stop_count - 1);
+    size_t index = (size_t)scaled;
+    if (index >= stop_count - 1)
+    {
+        const ir_color_stop_t *last = &stops[stop_count - 1];
+        return lv_color_make(last->r, last->g, last->b).full;
+    }
+
+    float t = scaled - (float)index;
+    const ir_color_stop_t *a = &stops[index];
+    const ir_color_stop_t *b = &stops[index + 1];
+    uint8_t r = (uint8_t)((float)a->r + t * ((float)b->r - (float)a->r) + 0.5f);
+    uint8_t g = (uint8_t)((float)a->g + t * ((float)b->g - (float)a->g) + 0.5f);
+    uint8_t blue = (uint8_t)((float)a->b + t * ((float)b->b - (float)a->b) + 0.5f);
+    return lv_color_make(r, g, blue).full;
 }
 
 /** 1. 白热：深黑背景 -> 银白手指 -> 亮白掌心 */
@@ -301,6 +329,37 @@ uint16_t ir_temp_to_cold_hot_rgb565(float val, float min_t, float max_t)
     return lv_color_make(r, g, b).full;
 }
 
+/** 医疗色带：冷区蓝青，过渡区绿色/黄色，热区红白。 */
+uint16_t ir_temp_to_medical_rgb565(float val, float min_t, float max_t)
+{
+    static const ir_color_stop_t stops[] = {
+        {0, 0, 48},
+        {0, 40, 180},
+        {0, 190, 255},
+        {0, 220, 100},
+        {255, 235, 0},
+        {255, 50, 0},
+        {255, 255, 255},
+    };
+    const float norm = normalize_temperature(val, min_t, max_t);
+    return interpolate_palette(norm, stops, sizeof(stops) / sizeof(stops[0]));
+}
+
+/** 热铁色带：黑红底色逐步过渡到橙黄与白色高温区。 */
+uint16_t ir_temp_to_thermal_iron_rgb565(float val, float min_t, float max_t)
+{
+    static const ir_color_stop_t stops[] = {
+        {0, 0, 0},
+        {60, 0, 0},
+        {180, 0, 0},
+        {255, 65, 0},
+        {255, 190, 0},
+        {255, 255, 255},
+    };
+    const float norm = normalize_temperature(val, min_t, max_t);
+    return interpolate_palette(norm, stops, sizeof(stops) / sizeof(stops[0]));
+}
+
 uint16_t ir_temp_to_rgb565(ir_color_mode_t mode, float val,
                            float min_t, float max_t)
 {
@@ -322,6 +381,10 @@ uint16_t ir_temp_to_rgb565(ir_color_mode_t mode, float val,
         return ir_temp_to_green_hot_rgb565(val, min_t, max_t);
     case IR_COLOR_COLD_HOT:
         return ir_temp_to_cold_hot_rgb565(val, min_t, max_t);
+    case IR_COLOR_MEDICAL:
+        return ir_temp_to_medical_rgb565(val, min_t, max_t);
+    case IR_COLOR_THERMAL_IRON:
+        return ir_temp_to_thermal_iron_rgb565(val, min_t, max_t);
     case IR_COLOR_IRONBOW:
     default:
         return ir_temp_to_ironbow_rgb565(val, min_t, max_t);
@@ -360,6 +423,10 @@ const char *ir_color_get_mode_name(ir_color_mode_t mode)
         return "Green Hot";
     case IR_COLOR_COLD_HOT:
         return "Cold-Hot";
+    case IR_COLOR_MEDICAL:
+        return "Medical";
+    case IR_COLOR_THERMAL_IRON:
+        return "Thermal Iron";
     default:
         return "Ironbow";
     }

@@ -17,6 +17,8 @@ typedef enum {
     IR_COLOR_ARCTIC,         // 7. 极地：深蓝 -> 冰青 -> 银白 -> 暖金高光
     IR_COLOR_GREEN_HOT,      // 8. 绿热：纯黑 -> 暗绿 -> 荧光翠绿 -> 亮白绿（夜视风）
     IR_COLOR_COLD_HOT,       // 9. 冷热双警示：低温标蓝 + 中温灰阶 + 高温标红
+    IR_COLOR_MEDICAL,        // 10. 医疗：深蓝 -> 青绿 -> 黄红 -> 白
+    IR_COLOR_THERMAL_IRON,   // 11. 热铁：黑 -> 红 -> 黄 -> 白
     IR_COLOR_MODE_MAX        // 模式总数（方便 UI 下拉框或按键循环切换）
 } ir_color_mode_t;
 
@@ -30,6 +32,8 @@ uint16_t ir_temp_to_arctic_rgb565(float val, float min_t, float max_t);
 uint16_t ir_temp_to_inferno_rgb565(float val, float min_t, float max_t);
 uint16_t ir_temp_to_green_hot_rgb565(float val, float min_t, float max_t);
 uint16_t ir_temp_to_cold_hot_rgb565(float val, float min_t, float max_t);
+uint16_t ir_temp_to_medical_rgb565(float val, float min_t, float max_t);
+uint16_t ir_temp_to_thermal_iron_rgb565(float val, float min_t, float max_t);
 
 // 统一入口：根据 mode 选择颜色映射
 uint16_t ir_temp_to_rgb565(ir_color_mode_t mode, float val,

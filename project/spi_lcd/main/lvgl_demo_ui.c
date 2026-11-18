@@ -132,6 +132,8 @@ static const uint32_t s_mode_dot_hex[IR_COLOR_MODE_MAX] = {
     0x00E5FF, // Arctic
     0x76FF03, // Green Hot
     0x2979FF, // Cold-Hot
+    0x00DC64, // Medical
+    0xFF4100, // Thermal Iron
 };
 
 /* ================= 蓝白主题通用样式辅助 ================= */
@@ -713,7 +715,7 @@ static void create_settings_menu(lv_obj_t *parent)
     lv_obj_set_scroll_dir(s_list_cont, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(s_list_cont, LV_SCROLLBAR_MODE_ACTIVE);
 
-    // 往滑动列表中添加 9 个全宽选项条 (244x32)
+    // 往滑动列表中添加全宽选项条 (244x32)
     for (int i = 0; i < IR_COLOR_MODE_MAX; i++) {
         lv_obj_t *btn = lv_obj_create(s_list_cont);
         lv_obj_remove_style_all(btn);
