@@ -16,6 +16,7 @@
 #include "driver/spi_master.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_pm.h"
 #include "lvgl.h"
 #include "ir_mlx90640_app.h"
 #include "dev_sys.h"
@@ -95,6 +96,19 @@ static const char *TAG = "thermal imaging_eg";
 #define EXAMPLE_LVGL_TASK_PRIORITY 2
 
 static SemaphoreHandle_t lvgl_mux = NULL;
+static esp_pm_lock_handle_t lvgl_cpu_freq_lock = NULL;
+
+static void app_power_management_init(void)
+{
+    const esp_pm_config_t pm_config = {
+        .max_freq_mhz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
+        .min_freq_mhz = 80,
+        .light_sleep_enable = false,
+    };
+    ESP_ERROR_CHECK(esp_pm_configure(&pm_config));
+    ESP_ERROR_CHECK(esp_pm_lock_create(ESP_PM_CPU_FREQ_MAX, 0,
+                                      "lvgl_cpu", &lvgl_cpu_freq_lock));
+}
 
 #if CONFIG_EXAMPLE_LCD_TOUCH_ENABLED
 
@@ -243,12 +257,14 @@ static void example_lvgl_port_task(void *arg)
     while (1)
     {
         // Lock the mutex due to the LVGL APIs are not thread-safe
+        ESP_ERROR_CHECK(esp_pm_lock_acquire(lvgl_cpu_freq_lock));
         if (example_lvgl_lock(-1))
         {
             task_delay_ms = lv_timer_handler();
             // Release the mutex
             example_lvgl_unlock();
         }
+        ESP_ERROR_CHECK(esp_pm_lock_release(lvgl_cpu_freq_lock));
 
         if (task_delay_ms > EXAMPLE_LVGL_TASK_MAX_DELAY_MS)
         {
@@ -269,6 +285,7 @@ void app_main(void)
     static lv_disp_draw_buf_t disp_buf; // contains internal graphic buffer(s) called draw buffer(s)
     static lv_disp_drv_t disp_drv;      // contains callback functions
 
+    app_power_management_init();
     power_on();
 
     ESP_LOGI(TAG, "Turn_off_LCD_backlight");

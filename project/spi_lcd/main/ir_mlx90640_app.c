@@ -6,6 +6,7 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_pm.h"
 #include "driver/i2c_master.h"
 #include "esp_heap_caps.h"
 #include "nvs.h"
@@ -226,10 +227,8 @@ static void update_temporal_and_deinterlace(const float *raw_src, float *filt_st
 
     // 阶段 A：仅更新当前 subpage 新采样的 384 个真实像素
     for (int r = 0; r < h; r++) {
-        for (int c = 0; c < w; c++) {
-            if (((r + c) & 1) != subpage) {
-                continue;
-            }
+        int first_c = ((r & 1) == subpage) ? 0 : 1;
+        for (int c = first_c; c < w; c += 2) {
             int idx = r * w + c;
             float raw_v = raw_src[idx];
             float prev_v = filt_state[idx];
@@ -259,10 +258,8 @@ static void update_temporal_and_deinterlace(const float *raw_src, float *filt_st
         int r_prev = (r > 0) ? (r - 1) : r;
         int r_next = (r < h - 1) ? (r + 1) : r;
 
-        for (int c = 0; c < w; c++) {
-            if (((r + c) & 1) == subpage) {
-                continue;
-            }
+        int first_c = ((r & 1) == subpage) ? 1 : 0;
+        for (int c = first_c; c < w; c += 2) {
             int idx = r * w + c;
             float val = filt_state[idx];
 
@@ -392,11 +389,44 @@ static void spatial_median_outlier_filter(const float *src, float *dst, int w, i
     }
 }
 
-static int compare_float_ascending(const void *a, const void *b)
+static void select_nth_float(float *values, int count, int nth)
 {
-    float x = *(const float *)a;
-    float y = *(const float *)b;
-    return (x > y) - (x < y);
+    int lo = 0;
+    int hi = count;
+
+    while (hi - lo > 1) {
+        int mid = lo + (hi - lo) / 2;
+        float a = values[lo];
+        float b = values[mid];
+        float c = values[hi - 1];
+        float pivot = (a < b) ? ((b < c) ? b : ((a < c) ? c : a))
+                              : ((a < c) ? a : ((b < c) ? c : b));
+
+        int less = lo;
+        int scan = lo;
+        int greater = hi;
+        while (scan < greater) {
+            if (values[scan] < pivot) {
+                float tmp = values[less];
+                values[less++] = values[scan];
+                values[scan++] = tmp;
+            } else if (values[scan] > pivot) {
+                float tmp = values[--greater];
+                values[greater] = values[scan];
+                values[scan] = tmp;
+            } else {
+                scan++;
+            }
+        }
+
+        if (nth < less) {
+            hi = less;
+        } else if (nth >= greater) {
+            lo = greater;
+        } else {
+            return;
+        }
+    }
 }
 
 /*
@@ -1134,6 +1164,10 @@ void ir_camera_task_main(void *pvParameters)
 {
     (void)pvParameters;
 
+    esp_pm_lock_handle_t cpu_freq_lock = NULL;
+    ESP_ERROR_CHECK(esp_pm_lock_create(ESP_PM_CPU_FREQ_MAX, 0,
+                                      "ir_frame", &cpu_freq_lock));
+
     ESP_LOGI(TAG, "IR camera task started on Core %d", xPortGetCoreID());
     ESP_LOGI(TAG, "Thermal map: fixed range %.1fC ~ %.1fC, auto_range=%d",
              THERMAL_FIXED_MIN_C, THERMAL_FIXED_MAX_C, THERMAL_USE_AUTO_RANGE);
@@ -1236,6 +1270,8 @@ void ir_camera_task_main(void *pvParameters)
                 continue;
             }
 
+            ESP_ERROR_CHECK(esp_pm_lock_acquire(cpu_freq_lock));
+
             float raw_ta = MLX90640_GetTa(ir_frame_data, mlx_params);
             if (!ta_initialized || !isfinite(smooth_ta)) {
                 smooth_ta = raw_ta;
@@ -1262,6 +1298,7 @@ void ir_camera_task_main(void *pvParameters)
                     memcpy(filtered_temp, raw_temp_matrix, MLX_RAW_PIXELS * sizeof(float));
                     range_initialized = false;   /* 让自动量程重新平滑，避免色阶跳变 */
                 }
+                ESP_ERROR_CHECK(esp_pm_lock_release(cpu_freq_lock));
                 vTaskDelay(pdMS_TO_TICKS(2));
                 continue;
             }
@@ -1269,6 +1306,7 @@ void ir_camera_task_main(void *pvParameters)
             if (!subpage_init[0] || !subpage_init[1]) {
                 // 首轮先将 raw_temp_matrix 同步到 filtered_temp
                 memcpy(filtered_temp, raw_temp_matrix, MLX_RAW_PIXELS * sizeof(float));
+                ESP_ERROR_CHECK(esp_pm_lock_release(cpu_freq_lock));
                 vTaskDelay(pdMS_TO_TICKS(2));
                 continue;
             }
@@ -1307,30 +1345,26 @@ void ir_camera_task_main(void *pvParameters)
                 if (val > 1.0f && val < 200.0f && isfinite(val)) {
                     if (val < cur_min) { cur_min = val; min_idx = i; }
                     if (val > cur_max) { cur_max = val; max_idx = i; }
-                    valid_pts++;
+                    median_temp[valid_pts++] = val;
                 }
             }
 
             if (valid_pts <= 0) {
+                ESP_ERROR_CHECK(esp_pm_lock_release(cpu_freq_lock));
                 vTaskDelay(pdMS_TO_TICKS(2));
                 continue;
             }
 
 #if THERMAL_USE_AUTO_RANGE
-            int n_valid = 0;
-            for (int i = 0; i < MLX_RAW_PIXELS; i++) {
-                float t = spatial_temp[i];
-                if (isfinite(t) && t > 1.0f && t < 200.0f) {
-                    median_temp[n_valid++] = t;
-                }
-            }
-
             float robust_min = cur_min;
             float robust_max = cur_max;
-            if (n_valid >= 100) {
-                qsort(median_temp, n_valid, sizeof(float), compare_float_ascending);
-                robust_min = median_temp[(n_valid - 1) * THERMAL_PERCENTILE_LOW / 100];
-                robust_max = median_temp[(n_valid - 1) * THERMAL_PERCENTILE_HIGH / 100];
+            if (valid_pts >= 100) {
+                int low_idx = (valid_pts - 1) * THERMAL_PERCENTILE_LOW / 100;
+                int high_idx = (valid_pts - 1) * THERMAL_PERCENTILE_HIGH / 100;
+                select_nth_float(median_temp, valid_pts, low_idx);
+                robust_min = median_temp[low_idx];
+                select_nth_float(median_temp, valid_pts, high_idx);
+                robust_max = median_temp[high_idx];
             }
 
             /* 融合真实极值 cur_max 与 99% 分位数，确保小面积热源也能撑开色彩映射 */
@@ -1501,6 +1535,7 @@ void ir_camera_task_main(void *pvParameters)
                     example_lvgl_unlock();
                 }
             }
+            ESP_ERROR_CHECK(esp_pm_lock_release(cpu_freq_lock));
         }
 
         vTaskDelay(pdMS_TO_TICKS(status >= 0 ? 2 : 10));
