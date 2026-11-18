@@ -93,10 +93,6 @@ static lv_img_dsc_t s_photo_dsc;
 static int        s_viewer_idx    = -1;
 static lv_point_t s_viewer_swipe_start = {0, 0};
 
-static lv_obj_t *s_toast          = NULL;
-static lv_obj_t *s_toast_lbl      = NULL;
-static lv_timer_t *s_toast_timer  = NULL;
-
 /* 前向声明（函数间相互调用） */
 static void create_settings_menu(lv_obj_t *parent);
 static void apply_language_change(void);
@@ -104,7 +100,6 @@ extern void thermal_ui_refresh_language(void);
 static void rebuild_gallery_list(void);
 static void open_viewer(int idx);
 static void close_viewer(void);
-static void show_toast(const char *msg);
 static bool menu_click_guard(void);
 
 /* 左右滑动状态：按下记录起点，移动过程中达到阈值立即切换（不依赖松手事件） */
@@ -117,15 +112,12 @@ static bool s_press_hold_candidate = false;
 static bool s_long_press_fired = false;
 static uint32_t s_press_start_ms = 0;
 
-/* 双击拍照计数 + 长按打开菜单时刻（用于防误触） */
-static uint32_t s_tap_count = 0;
-static uint32_t s_tap_last_ms = 0;
+/* 长按打开菜单时刻（用于防误触） */
 static uint32_t s_menu_open_ms = 0;
 static lv_timer_t *s_fixture_save_timer = NULL;
 
 #define COLOR_SWIPE_MIN_DX       24   // 水平移动超过 24px 立即切换配色
 #define COLOR_SWIPE_MOVE_PX       5   // 超过 5px 视为“在滑动”，不再触发长按菜单
-#define TAP_MOVE_PX              12   // 双击拍照允许的轻微抖动
 #define MENU_HOLD_TOLERANCE_PX   24   // 长按期间允许的触摸抖动
 #define MENU_HOLD_TIME_MS       500U  // 长按 0.5 秒呼出设置菜单
 #define MENU_SWIPE_EXIT_DX       60   // 菜单打开后，左右滑动超过 60px 退出菜单
@@ -427,28 +419,6 @@ static lv_obj_t *create_list_entry(lv_obj_t *parent, const char *text, bool red,
     return btn;
 }
 
-/* ================= 顶部提示 toast ================= */
-static void toast_clear_cb(lv_timer_t *t)
-{
-    (void)t;
-    if (s_toast) lv_obj_add_flag(s_toast, LV_OBJ_FLAG_HIDDEN);
-    s_toast_timer = NULL;
-}
-
-static void show_toast(const char *msg)
-{
-    if (!s_toast) return;
-    lv_label_set_text(s_toast_lbl, msg);
-    lv_obj_clear_flag(s_toast, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_move_foreground(s_toast);
-    if (s_toast_timer) {
-        lv_timer_del(s_toast_timer);
-        s_toast_timer = NULL;
-    }
-    s_toast_timer = lv_timer_create(toast_clear_cb, 2000, NULL);
-    lv_timer_set_repeat_count(s_toast_timer, 1);
-}
-
 /* ================= 拍照 / 相册 / 语言回调 ================= */
 
 static void main_menu_language_cb(lv_event_t *e)
@@ -458,24 +428,8 @@ static void main_menu_language_cb(lv_event_t *e)
     menu_show_language();
 }
 
-/* 拍照：保存归一化温度矩阵（压缩存储），相册查看时再渲染（双击屏幕触发） */
+/* 相册查看与内部照片渲染共用的归一化缓冲区 */
 static uint8_t s_norm_tmp[PHOTO_NORM_BYTES];
-
-static void do_capture(void)
-{
-    float mn = 0.0f, mx = 0.0f;
-    ir_camera_get_norm_matrix(s_norm_tmp);
-    ir_camera_get_snapshot_range(&mn, &mx);
-    esp_err_t err = photo_capture(s_norm_tmp, (int)ir_camera_get_color_mode(), mn, mx);
-    show_toast((err == ESP_OK) ? lang_str(STR_SAVED) : lang_str(STR_FULL));
-}
-
-static void main_menu_gallery_cb(lv_event_t *e)
-{
-    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
-    if (menu_click_guard()) return;
-    menu_show_gallery();
-}
 
 static void language_item_click_cb(lv_event_t *e)
 {
@@ -726,7 +680,6 @@ static void create_settings_menu(lv_obj_t *parent)
 
     create_list_entry(s_main_menu_list, lang_str(STR_COLOR_MODE), false, true, main_menu_color_cb, NULL, NULL, 238, 38);
     create_list_entry(s_main_menu_list, lang_str(STR_LANGUAGE),  false, true, main_menu_language_cb, NULL, NULL, 238, 38);
-    create_list_entry(s_main_menu_list, lang_str(STR_GALLERY),   false, true, main_menu_gallery_cb, NULL, NULL, 238, 38);
     create_list_entry(s_main_menu_list, lang_str(STR_POWER_OFF), true,  false, power_button_cb, NULL, NULL, 238, 38);
 
     /* ================= 二级菜单：色彩模式调色板 ================= */
@@ -998,15 +951,10 @@ static void screen_touch_event_cb(lv_event_t *e)
         return;
     }
 
-    /* 双击屏幕 → 拍照（菜单未打开时；滑动不算点击） */
+    /* 菜单未打开时处理点击（双击拍照功能已关闭） */
     if (code == LV_EVENT_CLICKED) {
         lv_point_t p;
         lv_indev_get_point(indev, &p);
-        int dx = p.x - s_swipe_start.x;
-        int dy = p.y - s_swipe_start.y;
-        if (abs(dx) > TAP_MOVE_PX || abs(dy) > TAP_MOVE_PX) {
-            return; /* 是滑动，不算点击 */
-        }
 
         if (g_ir_settings.label_fixture) {
             g_ir_settings.fixture_px_x = (int)ui_clamp(p.x, 0, UI_SCREEN_W - 1);
@@ -1019,17 +967,6 @@ static void screen_touch_event_cb(lv_event_t *e)
             lv_timer_set_repeat_count(s_fixture_save_timer, 1);
         }
 
-        uint32_t now = lv_tick_get();
-        if (now - s_tap_last_ms < 700) {
-            s_tap_count++;
-        } else {
-            s_tap_count = 1;
-        }
-        s_tap_last_ms = now;
-        if (s_tap_count >= 2) {
-            s_tap_count = 0;
-            do_capture();
-        }
         return;
     }
 
@@ -1287,25 +1224,6 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
     lv_obj_clear_flag(touch_label, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(touch_label, LV_OBJ_FLAG_HIDDEN);
 
-    // 8. 弹窗提示（居中，2 秒后消失；白底蓝边）
-    s_toast = lv_obj_create(ui_root);
-    lv_obj_remove_style_all(s_toast);
-    lv_obj_set_size(s_toast, 184, 56);
-    lv_obj_align(s_toast, LV_ALIGN_CENTER, 0, -24);
-    lv_obj_set_style_bg_color(s_toast, lv_color_white(), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(s_toast, LV_OPA_90, LV_PART_MAIN);
-    lv_obj_set_style_radius(s_toast, 12, LV_PART_MAIN);
-    lv_obj_set_style_border_width(s_toast, 2, LV_PART_MAIN);
-    lv_obj_set_style_border_color(s_toast, lv_color_hex(T_PRIMARY), LV_PART_MAIN);
-    lv_obj_add_flag(s_toast, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_flag(s_toast, LV_OBJ_FLAG_HIDDEN);
-
-    s_toast_lbl = lv_label_create(s_toast);
-    lv_obj_set_style_text_color(s_toast_lbl, lv_color_hex(T_TEXT_DARK), LV_PART_MAIN);
-    lv_obj_set_style_text_font(s_toast_lbl, lang_font(), LV_PART_MAIN);
-    lv_label_set_text(s_toast_lbl, "");
-    lv_obj_center(s_toast_lbl);
-
     // 9. 照片查看器全屏（横屏）
     s_viewer_overlay = lv_obj_create(ui_root);
     lv_obj_remove_style_all(s_viewer_overlay);
@@ -1412,7 +1330,7 @@ void thermal_ui_refresh_language(void)
     lv_obj_t *labels[] = {
         label_title, label_fps_float, label_info,
         tag_max, tag_min, tag_fix, tag_emissivity,
-        s_viewer_title, s_toast_lbl,
+        s_viewer_title,
     };
     for (size_t i = 0; i < sizeof(labels) / sizeof(labels[0]); i++) {
         if (labels[i]) {

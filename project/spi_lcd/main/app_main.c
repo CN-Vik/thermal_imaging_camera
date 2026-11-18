@@ -21,7 +21,6 @@
 #include "dev_sys.h"
 #include "lang.h"
 #include "boot_ui.h"
-#include "photo.h"
 #include "ir_settings_ui.h"
 #include "esp_lcd_touch_cst816s.h"
 #include "driver/i2c_master.h"
@@ -439,7 +438,6 @@ void app_main(void)
 
     /* ============ 开机 Logo + 首次开机语言选择 ============ */
     lang_init();
-    photo_init();
     boot_show_splash(disp);
     if (!lang_configured()) {
         boot_show_language_select(disp);

@@ -12,9 +12,6 @@
 #include "ir_mlx90640_app.h"
 #include "lang.h"
 #include "nvs.h"
-#include "photo.h"
-
-extern void thermal_ui_show_gallery(void);
 extern void thermal_ui_refresh_language(void);
 
 static const char *TAG = "ir_settings";
@@ -272,14 +269,6 @@ static void menu_item_event_cb(lv_event_t *event)
     schedule_page(page);
 }
 
-static void gallery_event_cb(lv_event_t *event)
-{
-    if (lv_event_get_code(event) != LV_EVENT_CLICKED) return;
-    if (menu_click_guard()) return;
-    ir_settings_ui_close();
-    thermal_ui_show_gallery();
-}
-
 static void settings_power_off_event_cb(lv_event_t *event)
 {
     if (lv_event_get_code(event) != LV_EVENT_CLICKED) return;
@@ -402,7 +391,6 @@ static void render_main_page(void)
     add_menu_row(list, lang_str(STR_COLOR_STYLE), PAGE_COLOR);
     add_menu_row(list, lang_str(STR_TEMP_LABEL), PAGE_LABELS);
     add_menu_row(list, lang_str(STR_CHART), PAGE_CHART);
-    add_custom_menu_row(list, lang_str(STR_GALLERY), gallery_event_cb, NULL, false);
     add_menu_row(list, lang_str(STR_ROTATE), PAGE_ROTATE);
     add_menu_row(list, lang_str(STR_MIRROR), PAGE_MIRROR);
     add_menu_row(list, lang_str(STR_TEMP_SCALE), PAGE_SCALE);
@@ -1329,7 +1317,6 @@ static void factory_reset_async_cb(void *unused)
 {
     (void)unused;
     ir_camera_settings_reset();
-    photo_delete_all();
     nvs_handle_t handle;
     if (nvs_open("ir_chart", NVS_READWRITE, &handle) == ESP_OK) {
         nvs_erase_key(handle, "samples");
