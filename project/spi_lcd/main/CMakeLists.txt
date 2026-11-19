@@ -1,4 +1,5 @@
 file(GLOB srcs "*.c" "bsp/*.c" "mlx90640/*.c")
+list(FILTER srcs EXCLUDE REGEX "new_boot-280x240\\.c$")
 
 idf_component_register(
     SRCS ${srcs}

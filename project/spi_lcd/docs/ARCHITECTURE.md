@@ -107,7 +107,7 @@ project/spi_lcd/
 | `lang_data.c` | 生成文件 | 5 语言字符串表（由 `_gen_fonts.py` 生成，**勿手改**） |
 | `app_font_zh/ja/ko/ru.c` | 生成文件 | 4 套字体子集，18 px，4 bpp（由 `_gen_fonts.py` 生成，**勿手改**） |
 | `boot_ui.c/.h` | ~200 | 开机 Logo（1.5 s）+ 首次开机语言选择（阻塞） |
-| `power_on_start_img.c` | 图片数组 | 280×240 开机图 RGB565 C 数组 |
+| `power_on_start_img.c` | 图片数组 | 从 `new_boot-280x240.c` 提取 PNG，裁切并将图标等比例放大一倍生成 RGB565；运行 `python tools/gen_boot_landscape.py` 可重新生成 |
 | `dev_sys.c/.h` | ~130 | 电源自锁、软件关机、自动关机定时器、重启 |
 | `bsp/bsp_i2c.c/.h` | ~120 | MLX90640 用的 I2C0 总线封装（读写字节） |
 | `mlx90640/MLX90640_API.c` | 官方 | 传感器寄存器/EEPROM/温度计算/坏点校正 |
