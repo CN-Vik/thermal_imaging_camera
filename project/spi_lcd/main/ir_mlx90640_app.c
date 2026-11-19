@@ -117,22 +117,16 @@ ir_app_settings_t g_ir_settings = {
 /* 3x3 孤立噪点抑制阈值：平坦背景区使用 0.58℃，手指边缘区自动切换为二阶连通保护 */
 #define THERMAL_OUTLIER_THRESH_C        0.58f
 
-/*
- * 自动量程参数（完全保持原版参数）：
- * - AUTO_RANGE_MIN_SPAN_C 设为 10.0℃，防止无热源时把 5℃ 的背景底噪拉伸成满屏花斑
- * - AUTO_RANGE_HIGHLIGHT_HEADROOM_C 预留 1.3℃ 顶部余量，防止手掌核心区过曝惨白
- */
-/*想让 26~27℃ 的弱热源颜色更夸张：
-把 AUTO_RANGE_MIN_SPAN_C 从 3.8f 改小到 2.8f 或 3.0f。值越小，
-微弱温差的颜色对比越强烈。*/
-#define AUTO_RANGE_MIN_SPAN_C           2.8f 
-#define AUTO_RANGE_LOW_PADDING_C        0.4f
-#define AUTO_RANGE_HIGHLIGHT_HEADROOM_C 1.3f
+/* 较宽的自动量程与按温差增加的余量，避免大面积热区挤进色表顶端。 */
+#define AUTO_RANGE_MIN_SPAN_C           8.0f
+#define AUTO_RANGE_LOW_PADDING_C        0.5f
+#define AUTO_RANGE_LOW_PADDING_FRAC     0.03f
+#define AUTO_RANGE_HEADROOM_MIN_C       1.0f
+#define AUTO_RANGE_HEADROOM_FRAC        0.06f
 #define AUTO_RANGE_ALPHA                0.04f
 #define AUTO_RANGE_FALL_ALPHA           0.30f
 #define AUTO_RANGE_RISE_ALPHA           0.25f
 #define THERMAL_PERCENTILE_LOW           5
-#define THERMAL_PERCENTILE_HIGH          99
 
 /* 降发热优化：正常显示保持 16Hz（流畅度不变），仅热像被遮挡/息屏时降频降耗。
  *  - 设置菜单/调色板/相册/照片查看器 -> 4Hz（功耗约 15mA，退出恢复快）
@@ -195,6 +189,7 @@ static ir_color_mode_t s_cur_color_mode = THERMAL_COLOR_MODE;
 
 /* 归一化温度快照（供拍照压缩存储），每帧刷新 */
 static uint8_t s_norm_snapshot[MLX_RAW_PIXELS];
+static uint16_t s_norm16_frame[MLX_RAW_PIXELS];
 static float   s_snapshot_min_t = 0.0f;
 static float   s_snapshot_max_t = 0.0f;
 
@@ -486,7 +481,7 @@ static float min_valid_temperature(const float *values)
  */
 static void spatial_bilateral_denoise(const float *src, float *dst, int w, int h)
 {
-    const float edge_thresh_flat = 1.00f;
+    const float edge_thresh_flat = 0.75f;
     const float edge_thresh_hot_bleed = 0.65f; // 阻止高温邻居把低温指缝拉高
 
     for (int r = 0; r < h; r++) {
@@ -545,8 +540,8 @@ static void spatial_bilateral_denoise(const float *src, float *dst, int w, int h
                 }
             }
 
-            float sum_smooth = center * 6.0f;
-            float w_total = 6.0f;
+            float sum_smooth = center * 9.0f;
+            float w_total = 9.0f;
 
             for (int i = 0; i < 4; i++) {
                 if (ir_temperature_is_valid(ortho[i])) {
@@ -989,92 +984,129 @@ static inline int screen_xy_to_raw_idx(int px_x, int px_y)
     return raw_r * MLX_RAW_W + raw_c;
 }
 
-/*
- * 全屏双线性插值（恢复原版外层行预计算优化，同时兼容 0/90/180/270 度旋转与镜像）
- */
-static void bilinear_scale_fullscreen_1to1(const uint8_t *src, int src_w, int src_h,
-                                           uint16_t *dst, int dst_w, int dst_h,
-                                           const uint16_t *lut)
+static inline void catmull_rom_weights_q12(float t, int16_t weights[4])
 {
+    const float t2 = t * t;
+    const float t3 = t2 * t;
+    const int w0 = (int)lrintf((-0.5f * t + t2 - 0.5f * t3) * 4096.0f);
+    const int w2 = (int)lrintf((0.5f * t + 2.0f * t2 - 1.5f * t3) * 4096.0f);
+    const int w3 = (int)lrintf((-0.5f * t2 + 0.5f * t3) * 4096.0f);
+
+    weights[0] = (int16_t)w0;
+    weights[1] = (int16_t)(4096 - w0 - w2 - w3);
+    weights[2] = (int16_t)w2;
+    weights[3] = (int16_t)w3;
+}
+
+static inline int32_t round_shift_signed(int32_t value, unsigned int shift)
+{
+    const int32_t half = 1 << (shift - 1);
+    return value >= 0 ? (value + half) >> shift
+                      : -(((-value) + half) >> shift);
+}
+
+/*
+ * Separable Catmull-Rom scaling. Intermediate samples stay 16-bit and are
+ * clamped after each pass to prevent spline overshoot from creating halos.
+ */
+static void catmull_rom_scale_fullscreen_1to1(const uint16_t *src, int src_w, int src_h,
+                                              uint16_t *dst, int dst_w, int dst_h,
+                                              const uint16_t *lut)
+{
+    static uint16_t tmp[MLX_RAW_W * MLX_INTERP_W];
+    static uint8_t x_idx[MLX_INTERP_W][4];
+    static int16_t x_weights[MLX_INTERP_W][4];
+    static uint16_t transposed[MLX_RAW_PIXELS];
+
+    if (!src || !dst || !lut || src_w <= 1 || src_h <= 1 ||
+        src_w > MLX_RAW_W || src_h > MLX_RAW_H ||
+        dst_w <= 0 || dst_h <= 0 ||
+        dst_w > MLX_INTERP_W || dst_h > MLX_INTERP_H) {
+        return;
+    }
     if (!s_transform_valid) ir_camera_update_transform();
 
     const ir_rotate_t rot = g_ir_settings.rotate;
+    const bool swap = (rot == IR_ROT_90 || rot == IR_ROT_270);
     const bool mirror_x = ir_horizontal_mirror_enabled();
     const bool flip_x = (rot == IR_ROT_90 || rot == IR_ROT_180)
-                        ? !mirror_x
-                        : mirror_x;
+                        ? !mirror_x : mirror_x;
     const bool flip_y = (rot == IR_ROT_180 || rot == IR_ROT_270)
                         ? !g_ir_settings.mirror_vertical
                         : g_ir_settings.mirror_vertical;
 
-    const uint32_t max_col_fp = (uint32_t)(src_w - 1) << 16;
-    const uint32_t max_row_fp = (uint32_t)(src_h - 1) << 16;
-
-    if (rot == IR_ROT_90 || rot == IR_ROT_270) {
-        for (int y = 0; y < dst_h; y++) {
-            int eff_y = flip_y ? (dst_h - 1 - y) : y;
-            uint32_t c_fp = (uint32_t)eff_y * s_source_col_step_fp;
-            if (c_fp > max_col_fp) c_fp = max_col_fp;
-
-            int c0 = c_fp >> 16;
-            int c1 = (c0 < src_w - 1) ? (c0 + 1) : c0;
-            uint32_t c_diff = c_fp & 0xFFFFU;
-            uint32_t c_diff_inv = 65536U - c_diff;
-            uint16_t *dst_row = &dst[y * dst_w];
-
-            for (int x = 0; x < dst_w; x++) {
-                int eff_x = flip_x ? (dst_w - 1 - x) : x;
-                uint32_t r_fp = (uint32_t)eff_x * s_source_row_step_fp;
-                if (r_fp > max_row_fp) r_fp = max_row_fp;
-
-                int r0 = r_fp >> 16;
-                int r1 = (r0 < src_h - 1) ? (r0 + 1) : r0;
-                uint32_t r_diff = r_fp & 0xFFFFU;
-                uint32_t r_diff_inv = 65536U - r_diff;
-
-                const uint8_t *p_r0 = &src[r0 * src_w];
-                const uint8_t *p_r1 = &src[r1 * src_w];
-
-                uint32_t row0 = (p_r0[c0] * c_diff_inv + p_r0[c1] * c_diff) >> 16;
-                uint32_t row1 = (p_r1[c0] * c_diff_inv + p_r1[c1] * c_diff) >> 16;
-                uint32_t val  = (row0 * r_diff_inv + row1 * r_diff) >> 16;
-                if (val > 255U) val = 255U;
-
-                dst_row[x] = lut[val];
+    const uint16_t *input = src;
+    int input_w = src_w;
+    int input_h = src_h;
+    uint32_t step_x = s_source_col_step_fp;
+    uint32_t step_y = s_source_row_step_fp;
+    if (swap) {
+        for (int r = 0; r < src_h; r++) {
+            for (int c = 0; c < src_w; c++) {
+                transposed[c * src_h + r] = src[r * src_w + c];
             }
         }
-    } else {
-        for (int y = 0; y < dst_h; y++) {
-            int eff_y = flip_y ? (dst_h - 1 - y) : y;
-            uint32_t r_fp = (uint32_t)eff_y * s_source_row_step_fp;
-            if (r_fp > max_row_fp) r_fp = max_row_fp;
+        input = transposed;
+        input_w = src_h;
+        input_h = src_w;
+        step_x = s_source_row_step_fp;
+        step_y = s_source_col_step_fp;
+    }
 
-            int r0 = r_fp >> 16;
-            int r1 = (r0 < src_h - 1) ? (r0 + 1) : r0;
-            uint32_t r_diff = r_fp & 0xFFFFU;
-            uint32_t r_diff_inv = 65536U - r_diff;
+    const uint32_t max_x_fp = (uint32_t)(input_w - 1) << 16;
+    const uint32_t max_y_fp = (uint32_t)(input_h - 1) << 16;
 
-            const uint8_t *p_r0 = &src[r0 * src_w];
-            const uint8_t *p_r1 = &src[r1 * src_w];
-            uint16_t *dst_row = &dst[y * dst_w];
+    for (int x = 0; x < dst_w; x++) {
+        int eff_x = flip_x ? dst_w - 1 - x : x;
+        uint32_t pos = (uint32_t)eff_x * step_x;
+        if (pos > max_x_fp) pos = max_x_fp;
+        int base = (int)(pos >> 16);
+        float frac = (float)(pos & 0xFFFFU) * (1.0f / 65536.0f);
+        catmull_rom_weights_q12(frac, x_weights[x]);
+        for (int k = 0; k < 4; k++) {
+            x_idx[x][k] = (uint8_t)clamp_int_local(base - 1 + k, 0, input_w - 1);
+        }
+    }
 
-            for (int x = 0; x < dst_w; x++) {
-                int eff_x = flip_x ? (dst_w - 1 - x) : x;
-                uint32_t c_fp = (uint32_t)eff_x * s_source_col_step_fp;
-                if (c_fp > max_col_fp) c_fp = max_col_fp;
+    for (int r = 0; r < input_h; r++) {
+        const uint16_t *row = &input[r * input_w];
+        uint16_t *tmp_row = &tmp[r * dst_w];
+        for (int x = 0; x < dst_w; x++) {
+            int32_t value =
+                (int32_t)x_weights[x][0] * row[x_idx[x][0]] +
+                (int32_t)x_weights[x][1] * row[x_idx[x][1]] +
+                (int32_t)x_weights[x][2] * row[x_idx[x][2]] +
+                (int32_t)x_weights[x][3] * row[x_idx[x][3]];
+            tmp_row[x] = (uint16_t)clamp_int_local(round_shift_signed(value, 12),
+                                                   0, UINT16_MAX);
+        }
+    }
 
-                int c0 = c_fp >> 16;
-                int c1 = (c0 < src_w - 1) ? (c0 + 1) : c0;
-                uint32_t c_diff = c_fp & 0xFFFFU;
-                uint32_t c_diff_inv = 65536U - c_diff;
+    for (int y = 0; y < dst_h; y++) {
+        int eff_y = flip_y ? dst_h - 1 - y : y;
+        uint32_t pos = (uint32_t)eff_y * step_y;
+        if (pos > max_y_fp) pos = max_y_fp;
+        int base = (int)(pos >> 16);
+        float frac = (float)(pos & 0xFFFFU) * (1.0f / 65536.0f);
+        int16_t y_weights[4];
+        catmull_rom_weights_q12(frac, y_weights);
 
-                uint32_t top = (p_r0[c0] * c_diff_inv + p_r0[c1] * c_diff) >> 16;
-                uint32_t bot = (p_r1[c0] * c_diff_inv + p_r1[c1] * c_diff) >> 16;
-                uint32_t val = (top * r_diff_inv + bot * r_diff) >> 16;
-                if (val > 255U) val = 255U;
+        const uint16_t *rows[4];
+        for (int k = 0; k < 4; k++) {
+            int row = clamp_int_local(base - 1 + k, 0, input_h - 1);
+            rows[k] = &tmp[row * dst_w];
+        }
 
-                dst_row[x] = lut[val];
-            }
+        uint16_t *dst_row = &dst[y * dst_w];
+        for (int x = 0; x < dst_w; x++) {
+            int32_t value =
+                (int32_t)y_weights[0] * rows[0][x] +
+                (int32_t)y_weights[1] * rows[1][x] +
+                (int32_t)y_weights[2] * rows[2][x] +
+                (int32_t)y_weights[3] * rows[3][x];
+            int32_t sample = round_shift_signed(value, 12);
+            sample = clamp_int_local(sample, 0, UINT16_MAX);
+            dst_row[x] = lut[(uint32_t)sample >> 8];
         }
     }
 }
@@ -1084,6 +1116,7 @@ void ir_camera_render_norm(const uint8_t *norm, ir_color_mode_t mode, uint16_t *
 {
     if (!norm || !dst) return;
     uint16_t lut[256];
+    static uint16_t norm16[MLX_RAW_PIXELS];
     ir_color_generate_lut(mode, lut);
     if (g_ir_settings.color_reverse) {
         for (int i = 0; i < 128; i++) {
@@ -1092,8 +1125,11 @@ void ir_camera_render_norm(const uint8_t *norm, ir_color_mode_t mode, uint16_t *
             lut[255 - i] = tmp;
         }
     }
-    bilinear_scale_fullscreen_1to1(norm, MLX_RAW_W, MLX_RAW_H,
-                                   dst, MLX_INTERP_W, MLX_INTERP_H, lut);
+    for (int i = 0; i < MLX_RAW_PIXELS; i++) {
+        norm16[i] = (uint16_t)(norm[i] * 257U);
+    }
+    catmull_rom_scale_fullscreen_1to1(norm16, MLX_RAW_W, MLX_RAW_H,
+                                      dst, MLX_INTERP_W, MLX_INTERP_H, lut);
 }
 
 float ir_camera_convert_temp(float temp_c, const char **unit_str)
@@ -1174,8 +1210,8 @@ static inline void draw_diamond_marker(uint16_t *buf, int cx, int cy,
     }
 }
 
-static void temperature_to_norm_u8(const float *src, uint8_t *dst,
-                                   float smooth_min_t, float smooth_max_t)
+static void temperature_to_norm(const float *src, uint8_t *dst8, uint16_t *dst16,
+                                float smooth_min_t, float smooth_max_t)
 {
     float map_min = THERMAL_USE_AUTO_RANGE ? smooth_min_t : THERMAL_FIXED_MIN_C;
     float map_max = THERMAL_USE_AUTO_RANGE ? smooth_max_t : THERMAL_FIXED_MAX_C;
@@ -1185,37 +1221,36 @@ static void temperature_to_norm_u8(const float *src, uint8_t *dst,
         delta = 1.5f;
     }
 
-    float range_inv = 1.0f / delta;
-    /* 将用户设置的 gamma 基准转换：默认 1.5 时映射为 0.75 的热源提亮指数 */
-    float user_gamma = clampf_local(g_ir_settings.gamma, 0.5f, 3.0f);
-    float heat_gamma = clampf_local(user_gamma * 0.5f, 0.45f, 1.5f);
-    bool use_fast_curve = (fabsf(user_gamma - 1.5f) < 0.05f);
-
-    /* 底部 12% 设为环境底噪门限（约 0.45℃），低于门限压暗背景，高于门限快速显色 */
-    /*对着纯白墙面时如果觉得背景有零星彩色噪点：把 temperature_to_norm_u8 里的 
-    noise_gate 从 0.12f 调大到 0.18f，即可把背景底噪全部按回深色区*/
-    const float noise_gate = 0.175f;
+    const float range_inv = 1.0f / delta;
+    const float noise_gate = clampf_local(0.55f * range_inv, 0.02f, 0.15f);
     const float inv_above_gate = 1.0f / (1.0f - noise_gate);
+    const float low_delta_blend =
+        clampf_local((15.0f - delta) / 9.0f, 0.0f, 1.0f);
+    float user_gamma = clampf_local(g_ir_settings.gamma, 0.5f, 3.0f);
+    const float auto_gamma = 1.12f - 0.40f * low_delta_blend;
+    const float effective_gamma =
+        clampf_local(auto_gamma * (user_gamma / 1.5f), 0.55f, 2.2f);
+    const bool use_linear = fabsf(effective_gamma - 1.0f) < 0.03f;
 
     for (int i = 0; i < MLX_RAW_PIXELS; i++) {
         if (!ir_temperature_is_valid(src[i])) {
-            dst[i] = 0;
+            dst8[i] = 0;
+            dst16[i] = 0;
             continue;
         }
         float norm = (src[i] - map_min) * range_inv;
         norm = clampf_local(norm, 0.0f, 1.0f);
 
         if (norm <= noise_gate) {
-            /* 环境背景区：压在色表底部 0~4% 的深色区，保持背景干净 */
-            norm = (norm / noise_gate) * 0.04f;
+            norm = (norm / noise_gate) * 0.03f;
         } else {
-            /* 热源区：跨过门限后迅速拉升色阶，温度越高颜色越明显 */
             float t = (norm - noise_gate) * inv_above_gate;
-            float boosted = use_fast_curve ? sqrtf(t) : powf(t, heat_gamma);
-            norm = 0.04f + 0.96f * (0.55f * boosted + 0.45f * t);
+            float mapped = use_linear ? t : powf(t, effective_gamma);
+            norm = 0.03f + 0.97f * mapped;
         }
 
-        dst[i] = (uint8_t)(norm * 255.0f + 0.5f);
+        dst8[i] = (uint8_t)(norm * 255.0f + 0.5f);
+        dst16[i] = (uint16_t)(norm * 65535.0f + 0.5f);
     }
 }
 
@@ -1479,24 +1514,24 @@ void ir_camera_task_main(void *pvParameters)
 
 #if THERMAL_USE_AUTO_RANGE
             float robust_min = cur_min;
-            float robust_max = cur_max;
             if (valid_pts >= 100) {
                 int low_idx = (valid_pts - 1) * THERMAL_PERCENTILE_LOW / 100;
-                int high_idx = (valid_pts - 1) * THERMAL_PERCENTILE_HIGH / 100;
                 select_nth_float(median_temp, valid_pts, low_idx);
                 robust_min = median_temp[low_idx];
-                select_nth_float(median_temp, valid_pts, high_idx);
-                robust_max = median_temp[high_idx];
             }
 
-            /* 融合真实极值 cur_max 与 99% 分位数，确保小面积热源也能撑开色彩映射 */
-            float hot_ref = 0.60f * cur_max + 0.40f * robust_max;
-
-            float target_min = robust_min - AUTO_RANGE_LOW_PADDING_C;
-            float target_max = hot_ref + AUTO_RANGE_HIGHLIGHT_HEADROOM_C;
+            float span_est = cur_max - robust_min;
+            float low_padding = fmaxf(AUTO_RANGE_LOW_PADDING_C,
+                                      AUTO_RANGE_LOW_PADDING_FRAC * span_est);
+            float headroom = fmaxf(AUTO_RANGE_HEADROOM_MIN_C,
+                                   AUTO_RANGE_HEADROOM_FRAC * span_est);
+            float target_min = robust_min - low_padding;
+            float target_max = cur_max + headroom;
 
             if ((target_max - target_min) < AUTO_RANGE_MIN_SPAN_C) {
-                target_max = target_min + AUTO_RANGE_MIN_SPAN_C;
+                float mid = 0.5f * (target_min + target_max);
+                target_min = mid - 0.5f * AUTO_RANGE_MIN_SPAN_C;
+                target_max = mid + 0.5f * AUTO_RANGE_MIN_SPAN_C;
             }
 
             if (!range_initialized) {
@@ -1570,16 +1605,17 @@ void ir_camera_task_main(void *pvParameters)
                      lang_str(STR_FIX),
                      ir_camera_convert_temp(fixture_t, NULL), unit);
 
-            // 7. 映射并进行双线性插值送显（热像被遮挡/曲线页时不送显）
+            // 7. 保留 16-bit 归一化精度并用 Catmull-Rom 放大送显
             if (!ui_blocked && valid_pts > 400) {
-                temperature_to_norm_u8(spatial_temp, norm_matrix, smooth_min_t, smooth_max_t);
+                temperature_to_norm(spatial_temp, norm_matrix, s_norm16_frame,
+                                    smooth_min_t, smooth_max_t);
                 memcpy(s_norm_snapshot, norm_matrix, sizeof(s_norm_snapshot));
                 s_snapshot_min_t = smooth_min_t;
                 s_snapshot_max_t = smooth_max_t;
                 uint16_t *cur_write_buf = s_display_buf[s_back_idx];
 
-                bilinear_scale_fullscreen_1to1(
-                    norm_matrix,
+                catmull_rom_scale_fullscreen_1to1(
+                    s_norm16_frame,
                     MLX_RAW_W, 
                     MLX_RAW_H,
                     cur_write_buf,

@@ -26,7 +26,7 @@
 
 一台**手持式红外热成像相机**的完整固件：
 
-- **实时热像**：MLX90640 32×24 红外阵列 → 双线性插值放大到 280×240 → 伪彩色 → 屏幕
+- **实时热像**：MLX90640 32×24 红外阵列 → 16 位归一化 → Catmull-Rom 双三次插值到 280×240 → 伪彩色 → 屏幕
 - **9 种伪彩**：白热 / 黑热 / 彩虹 / 铁红 / 高热红 / 熔岩 / 极地 / 绿热 / 冷热双警示
 - **测温**：全画面最高温 / 最低温 / 中心点（或自定义定点）温度，带十字标记与气泡标签
 - **温度曲线**：最近 30 秒采样趋势图，可选采样源（中心 / 定点 / 最高 / 最低），显示 X 时间轴 + Y 温度轴刻度
@@ -268,11 +268,11 @@ MLX90640 (I2C, 16 Hz, chess 模式)
    ▼
 [7] 叠加 temperature_offset_c   出厂校准偏移
    ▼
-[8] 统计 min/max + 位置；5%/95% 分位数 + 平滑 → 颜色映射量程
+[8] 统计 min/max + 位置；5%低分位数及真实最大值 + 平滑 → 颜色映射量程
    ▼
-[9] temperature_to_norm_u8()    温度 → 0..255（含 gamma 曲线）
+[9] temperature_to_norm()       温度 → 16 位实时矩阵及 8 位照片快照
    ▼
-[10] bilinear_scale_fullscreen_1to1()   32×24 → 280×240，同时查 256 级 LUT 得到 RGB565
+[10] catmull_rom_scale_fullscreen_1to1() 32×24 → 280×240，同时查 256 级 LUT 得到 RGB565
    ▼
 [11] 画标记 + 写 PSRAM 缓冲 + 换指针 + 持锁通知 LVGL
 ```
@@ -341,26 +341,30 @@ filt = prev + alpha * (raw - prev)
 #define THERMAL_USE_AUTO_RANGE  1     // 1=自动，0=固定 THERMAL_FIXED_MIN_C(24)~MAX_C(35)
 ```
 自动模式的逻辑：
-1. 统计有效像素（`1℃ < t < 200℃` 且有限）的最小/最大值
-2. `n_valid ≥ 100` 时排序取 **5% / 95% 分位数**（`median_temp` 数组被复用为排序工作区）→ 单个异常点拉不爆画面
-3. `target_min = robust_min - 0.4`，`target_max = robust_max + 1.3`（顶部留头空间防止高光过曝）
-4. 若 `span < 10℃`，强制撑到 10℃（否则背景噪声被放大成花斑）
-5. 用 `alpha = 0.04` 对量程做 EMA 平滑 → 画面不会「呼吸」
+1. 统计有效像素的真实最小值和最大值。
+2. 有效像素不少于 100 时，以 5% 低分位数作为低端参考；顶部仍使用真实最大值，避免小面积热点被分位数裁掉。
+3. 低端余量取 `max(0.5℃, 温差×3%)`，高端余量取 `max(1℃, 温差×6%)`；最小显示跨度为 8℃。
+4. 量程分别用较慢的上升和较快的回落系数平滑，减少画面变化后的色阶滞留。
 
 #### [9] 归一化 + Gamma
-`temperature_to_norm_u8()`：
+`temperature_to_norm()` 根据量程门限和自适应伽马生成归一化值：
 ```c
 norm = clamp((t - min) / (max - min), 0, 1);
-curve = (gamma == 1.5f) ? norm * sqrtf(norm) : powf(norm, gamma);   // 默认 1.5 走快路径
-norm = 0.65f * curve + 0.35f * norm;   // 温和 S 曲线
-dst[i] = (uint8_t)(norm * 255.0f + 0.5f);
+noise_gate = clamp(0.55℃ / range, 2%, 15%);
+effective_gamma = clamp((1.12 - 0.40 * low_delta_blend) * user_gamma / 1.5, 0.55, 2.2);
+if (norm <= noise_gate)
+    norm = 0.03 * norm / noise_gate;
+else
+    norm = 0.03 + 0.97 * pow((norm - noise_gate) / (1 - noise_gate), effective_gamma);
+dst8[i] = round(norm * 255);
+dst16[i] = round(norm * 65535);
 ```
-`0.65*gamma + 0.35*linear` 的设计目的：压低背景暗部噪点，同时保住高温区和边缘细节。
+噪声门限和伽马随量程变化；实时插值使用 16 位矩阵，照片快照保留 8 位格式。
 
-#### [10] 双线性插值 + 查表上色
-`bilinear_scale_fullscreen_1to1()` 把 32×24 的 `uint8` 归一化矩阵放大到 280×240 的 RGB565：
-- 用定点数（`<<16` 步进）算权重，避免每像素浮点除法
-- 每像素 4 邻域加权 → 查 256 级 `s_color_lut[]` → 直接得到 RGB565
+#### [10] Catmull-Rom 双三次插值 + 查表上色
+`catmull_rom_scale_fullscreen_1to1()` 对 16 位归一化矩阵进行可分离插值，再查 256 级 LUT 输出 RGB565：
+- 定点坐标步进配合 Catmull-Rom 权重，实时插值避免先量化到 8 位
+- 插值中间值钳制到有效范围，避免过冲产生光晕
 - **同时处理旋转/镜像**（见 5.4）
 
 #### [11] 标记 + 提交显示
@@ -399,7 +403,7 @@ dst[i] = (uint8_t)(norm * 255.0f + 0.5f);
 |---|---|---|
 | `screen_xy_to_raw_idx()` → `screen_xy_to_source_fp()` | 屏幕 → 原始 | 触摸定点、中心点取值 |
 | `raw_rc_to_screen_xy()` | 原始 → 屏幕 | 最高/最低温标记与气泡定位 |
-| `bilinear_scale_fullscreen_1to1()` | 原始矩阵 → 屏幕图像 | 出图 |
+| `catmull_rom_scale_fullscreen_1to1()` | 归一化矩阵 → 屏幕图像 | 出图 |
 
 关键点：**镜像和旋转是耦合的**。代码里做了补偿：
 ```c
@@ -974,7 +978,7 @@ lv_chart_add_series(chart, color, LV_CHART_AXIS_PRIMARY_Y);  // ← add_series �
 | **LUT** | 查找表，这里指 256 级「归一化值 → RGB565」映射表 |
 | **HUD** | 主界面上的叠加信息层（标题、FPS、温度气泡等） |
 | **sw_rotate** | LVGL 软件旋转（像素级），区别于面板硬件旋转 |
-| **归一化矩阵** | 温度 → 0~255 的 uint8 矩阵，照片存储与插值都用它 |
+| **归一化矩阵** | 实时插值用 0~65535 的 16 位矩阵；照片仍存储 0~255 的 8 位矩阵 |
 | **定点 / fixture** | 用户指定的测温点，默认用屏幕中心 |
 
 ---
