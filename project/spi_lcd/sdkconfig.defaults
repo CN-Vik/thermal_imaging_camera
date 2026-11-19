@@ -15,3 +15,8 @@ CONFIG_LV_MEM_CUSTOM_INCLUDE="stdlib.h"
 # LVGL 自带 printf 默认不含 %f 支持，遇到 "%s %.1f %s %d" 这种浮点后面还跟参数的
 # 格式串会 va_list 错位，把 double 当 char* 解引用 -> LoadProhibited 重启。
 CONFIG_LV_SPRINTF_USE_FLOAT=y
+
+# Disable application and bootloader logs, and remove the ESP-IDF console UART.
+CONFIG_LOG_DEFAULT_LEVEL_NONE=y
+CONFIG_BOOTLOADER_LOG_LEVEL_NONE=y
+CONFIG_ESP_CONSOLE_NONE=y
