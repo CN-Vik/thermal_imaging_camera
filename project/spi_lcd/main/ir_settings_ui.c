@@ -646,18 +646,22 @@ static const char *chart_source_name(ir_chart_source_t s)
     }
 }
 
-/* Y 轴三档刻度：内部按 0.1 单位存，这里还原成当前配置的温度单位显示，顶部那档带单位 */
+static int chart_axis_round_to_integer(lv_coord_t value_tenths)
+{
+    int value = (int)value_tenths;
+    return value >= 0 ? (value + 5) / 10 : (value - 5) / 10;
+}
+
+/* Y 轴三档刻度内部按 0.1 单位存，显示时四舍五入到整数且不带单位。 */
 static void chart_axis_update(lv_coord_t lo, lv_coord_t hi)
 {
     if (!s_chart_ylbl[0]) return;
 
-    const char *unit = "C";
-    (void)ir_camera_convert_temp(0.0f, &unit);  /* 只取当前温度单位符号 */
-
     char buf[CHART_AXIS_LBL_CNT][16];
-    snprintf(buf[0], sizeof(buf[0]), "%.1f%s", (double)(hi / 10.0f), unit);
-    snprintf(buf[1], sizeof(buf[1]), "%.1f", (double)(((hi + lo) / 2) / 10.0f));
-    snprintf(buf[2], sizeof(buf[2]), "%.1f", (double)(lo / 10.0f));
+    snprintf(buf[0], sizeof(buf[0]), "%d", chart_axis_round_to_integer(hi));
+    snprintf(buf[1], sizeof(buf[1]), "%d",
+             chart_axis_round_to_integer((lv_coord_t)((hi + lo) / 2)));
+    snprintf(buf[2], sizeof(buf[2]), "%d", chart_axis_round_to_integer(lo));
 
     for (int i = 0; i < CHART_AXIS_LBL_CNT; i++) {
         if (s_chart_ylbl[i]) lv_label_set_text(s_chart_ylbl[i], buf[i]);
@@ -839,7 +843,7 @@ static void render_chart_page(void)
     }
     lv_chart_set_all_value(s_chart, s_chart_series, LV_CHART_POINT_NONE);
 
-    /* Y 轴刻度：与绘图区上 / 中 / 下三档分隔线对齐，顶部那档带当前温度单位 */
+    /* Y 轴刻度：与绘图区上 / 中 / 下三档分隔线对齐，显示整数且不带单位 */
     static const lv_coord_t y_axis_y[CHART_AXIS_LBL_CNT] = {
         CHART_TOP - 8,
         CHART_TOP + CHART_PLOT_H / 2 - 8,

@@ -1,11 +1,7 @@
 #include "ir_color_modes.h"
 #include <stddef.h>
 
-/**
- * 内部归一化与对比度重映射：
- * 在不改动 ir_mlx90640_app.c 原有量程系数的前提下，
- * 消除 [0.00 ~ 0.14] 的背景底噪灰雾，并将手掌所在的 [0.14 ~ 0.82] 拉伸至满量程 [0.0 ~ 1.0]。
- */
+/* 温度范围和对比度已在热像流水线中映射；色表只需线性归一化，避免重复拉伸造成高温细节过曝。 */
 static float normalize_temperature(float val, float min_t, float max_t)
 {
     if (max_t <= min_t)
@@ -14,23 +10,15 @@ static float normalize_temperature(float val, float min_t, float max_t)
     }
 
     float norm = (val - min_t) / (max_t - min_t);
-
-    // 针对原版自动量程留白做内部拉伸，使 32~34℃ 手掌能打满色阶顶部
-    const float lo_clip = 0.14f;
-    const float hi_clip = 0.82f;
-
-    if (norm <= lo_clip)
+    if (norm < 0.0f)
     {
         return 0.0f;
     }
-    if (norm >= hi_clip)
+    if (norm > 1.0f)
     {
         return 1.0f;
     }
-
-    norm = (norm - lo_clip) / (hi_clip - lo_clip);
-    // 轻度 S 曲线增强明暗对比
-    return norm * norm * (3.0f - 2.0f * norm);
+    return norm;
 }
 
 typedef struct
