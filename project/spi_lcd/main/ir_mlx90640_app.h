@@ -102,7 +102,6 @@ extern ir_app_settings_t g_ir_settings;
 // 导出底图描述符与半透明 HUD 控件
 extern lv_img_dsc_t s_thermal_img_dsc;
 extern lv_obj_t *img_thermal;
-extern lv_obj_t *label_title;
 extern lv_obj_t *label_fps_float;
 extern lv_obj_t *label_info;
 extern lv_obj_t *tag_max;

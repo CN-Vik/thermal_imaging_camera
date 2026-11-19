@@ -9,6 +9,7 @@
 #include "lang.h"
 #include "photo.h"
 #include "ir_settings_ui.h"
+#include "lvgl_demo_ui.h"
 
 /* ================= 横屏逻辑分辨率（与 app_main.c 中 UI_SCREEN_W/H 一致） ================= */
 #define UI_SCREEN_W        280
@@ -48,13 +49,18 @@ static inline lv_coord_t ui_clamp(lv_coord_t v, lv_coord_t lo, lv_coord_t hi)
 }
 
 lv_obj_t *img_thermal = NULL;
-lv_obj_t *label_title = NULL;
 lv_obj_t *label_fps_float = NULL;
 lv_obj_t *label_info = NULL;
 lv_obj_t *tag_max = NULL;
 lv_obj_t *tag_min = NULL;
 lv_obj_t *tag_fix = NULL;
 lv_obj_t *tag_emissivity = NULL;
+
+static lv_obj_t *s_battery_panel = NULL;
+static lv_obj_t *s_battery_outline = NULL;
+static lv_obj_t *s_battery_fill = NULL;
+static lv_obj_t *s_battery_cap = NULL;
+static lv_obj_t *s_battery_warning = NULL;
 
 static lv_obj_t *touch_cursor = NULL;
 static lv_obj_t *touch_label  = NULL;
@@ -281,9 +287,6 @@ static void menu_confirm_event_cb(lv_event_t *e)
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
 
     ir_camera_set_color_mode(s_pending_mode);
-    if (label_title) {
-        lv_label_set_text_fmt(label_title, "%s: %s", lang_str(STR_MODE), ir_color_get_mode_name(s_pending_mode));
-    }
     if (s_menu_backdrop) {
         lv_obj_add_flag(s_menu_backdrop, LV_OBJ_FLAG_HIDDEN);
     }
@@ -296,9 +299,6 @@ static void palette_back_event_cb(lv_event_t *e)
 
     // 撤销预览，恢复进入菜单前的颜色模式
     ir_camera_set_color_mode(s_backup_mode);
-    if (label_title) {
-        lv_label_set_text_fmt(label_title, "%s: %s", lang_str(STR_MODE), ir_color_get_mode_name(s_backup_mode));
-    }
     menu_show_main();
 }
 
@@ -311,9 +311,6 @@ static void menu_backdrop_cancel_cb(lv_event_t *e)
 
     // 恢复进入菜单前的颜色
     ir_camera_set_color_mode(s_backup_mode);
-    if (label_title) {
-        lv_label_set_text_fmt(label_title, "%s: %s", lang_str(STR_MODE), ir_color_get_mode_name(s_backup_mode));
-    }
     if (s_menu_backdrop) {
         lv_obj_add_flag(s_menu_backdrop, LV_OBJ_FLAG_HIDDEN);
     }
@@ -893,11 +890,6 @@ static void cycle_color_mode(int direction)
 
     ir_color_mode_t next_mode = (ir_color_mode_t)mode;
     ir_camera_set_color_mode(next_mode);
-
-    if (label_title) {
-        lv_label_set_text_fmt(label_title, "%s: %s", lang_str(STR_MODE),
-                              ir_color_get_mode_name(next_mode));
-    }
 }
 
 static void fixture_save_timer_cb(lv_timer_t *timer)
@@ -939,9 +931,6 @@ static void screen_touch_event_cb(lv_event_t *e)
             int dy = p.y - s_swipe_start.y;
             if (abs(dx) > MENU_SWIPE_EXIT_DX && abs(dx) > abs(dy) * 2) {
                 ir_camera_set_color_mode(s_backup_mode);
-                if (label_title) {
-                    lv_label_set_text_fmt(label_title, "%s: %s", lang_str(STR_MODE), ir_color_get_mode_name(s_backup_mode));
-                }
                 lv_obj_add_flag(s_menu_backdrop, LV_OBJ_FLAG_HIDDEN);
                 if (s_gallery_from_settings) {
                     s_gallery_from_settings = false;
@@ -1126,26 +1115,45 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
     lv_obj_set_size(img_thermal, UI_SCREEN_W, UI_SCREEN_H);
     lv_obj_clear_flag(img_thermal, LV_OBJ_FLAG_CLICKABLE);
 
-    // 2. 顶部标题胶囊（白底蓝字）
-    lv_obj_t *top_capsule = lv_obj_create(ui_root);
-    lv_obj_remove_style_all(top_capsule);
-    lv_obj_set_size(top_capsule, 190, 24);
-    lv_obj_align(top_capsule, LV_ALIGN_TOP_MID, 0, 4);
-    lv_obj_set_style_bg_color(top_capsule, lv_color_white(), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(top_capsule, LV_OPA_70, LV_PART_MAIN);
-    lv_obj_set_style_border_width(top_capsule, 1, LV_PART_MAIN);
-    lv_obj_set_style_border_color(top_capsule, lv_color_hex(T_ITEM_BORDER), LV_PART_MAIN);
-    lv_obj_set_style_border_opa(top_capsule, LV_OPA_60, LV_PART_MAIN);
-    lv_obj_set_style_radius(top_capsule, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    lv_obj_clear_flag(top_capsule, LV_OBJ_FLAG_CLICKABLE);
+    s_battery_panel = lv_obj_create(ui_root);
+    lv_obj_remove_style_all(s_battery_panel);
+    lv_obj_set_size(s_battery_panel, 42, 24);
+    lv_obj_set_pos(s_battery_panel, 232, 4);
+    lv_obj_set_style_bg_color(s_battery_panel, lv_color_hex(0x09061F), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_battery_panel, LV_OPA_30, LV_PART_MAIN);
+    lv_obj_set_style_border_width(s_battery_panel, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(s_battery_panel, 7, LV_PART_MAIN);
+    lv_obj_clear_flag(s_battery_panel, LV_OBJ_FLAG_CLICKABLE);
 
-    label_title = lv_label_create(top_capsule);
-    lv_obj_set_style_text_color(label_title, lv_color_hex(T_TEXT_DARK), LV_PART_MAIN);
-    lv_obj_set_style_text_font(label_title, lang_font(), LV_PART_MAIN);
-    lv_label_set_text_fmt(label_title, "%s: %s", lang_str(STR_MODE), ir_color_get_mode_name(ir_camera_get_color_mode()));
-    lv_obj_align(label_title, LV_ALIGN_CENTER, 0, 0);
+    s_battery_outline = lv_obj_create(s_battery_panel);
+    lv_obj_remove_style_all(s_battery_outline);
+    lv_obj_set_size(s_battery_outline, 23, 14);
+    lv_obj_set_pos(s_battery_outline, 5, 5);
+    lv_obj_set_style_bg_opa(s_battery_outline, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(s_battery_outline, 2, LV_PART_MAIN);
+    lv_obj_set_style_border_color(s_battery_outline, lv_color_hex(0xF4F4FA), LV_PART_MAIN);
+    lv_obj_set_style_border_opa(s_battery_outline, LV_OPA_70, LV_PART_MAIN);
+    lv_obj_set_style_radius(s_battery_outline, 1, LV_PART_MAIN);
+    lv_obj_clear_flag(s_battery_outline, LV_OBJ_FLAG_CLICKABLE);
 
-    // 3. 左上角帧率小药丸（白底蓝字，位于标题下方一行，避免与顶部标题胶囊重叠）
+    s_battery_fill = lv_obj_create(s_battery_outline);
+    lv_obj_remove_style_all(s_battery_fill);
+    lv_obj_set_pos(s_battery_fill, 2, 2);
+    lv_obj_set_size(s_battery_fill, 0, 6);
+    lv_obj_set_style_bg_color(s_battery_fill, lv_color_hex(0xE6E7EF), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_battery_fill, LV_OPA_70, LV_PART_MAIN);
+    lv_obj_set_style_radius(s_battery_fill, 1, LV_PART_MAIN);
+    lv_obj_clear_flag(s_battery_fill, LV_OBJ_FLAG_CLICKABLE);
+
+    s_battery_cap = lv_obj_create(s_battery_panel);
+    lv_obj_remove_style_all(s_battery_cap);
+    lv_obj_set_size(s_battery_cap, 3, 6);
+    lv_obj_set_pos(s_battery_cap, 29, 9);
+    lv_obj_set_style_bg_color(s_battery_cap, lv_color_hex(0xF4F4FA), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_battery_cap, LV_OPA_70, LV_PART_MAIN);
+    lv_obj_clear_flag(s_battery_cap, LV_OBJ_FLAG_CLICKABLE);
+
+    // 2. 左上角帧率小药丸
     label_fps_float = lv_label_create(ui_root);
     ui_style_pill(label_fps_float, T_ITEM_BORDER, T_PRIMARY, LV_OPA_60);
     lv_obj_set_style_text_font(label_fps_float, lang_font(), LV_PART_MAIN);
@@ -1154,13 +1162,13 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
     lv_obj_set_pos(label_fps_float, 6, 34);
     lv_label_set_text(label_fps_float, "-- FPS");
 
-    // 4. 右上角发射率小药丸（白底中蓝字）
+    // 3. 左侧发射率小药丸
     tag_emissivity = lv_label_create(ui_root);
     ui_style_pill(tag_emissivity, T_BORDER_LIGHT, T_TEXT_MID, LV_OPA_60);
     lv_obj_set_style_text_font(tag_emissivity, lang_font(), LV_PART_MAIN);
     lv_obj_set_style_pad_hor(tag_emissivity, 8, LV_PART_MAIN);
     lv_obj_set_style_pad_ver(tag_emissivity, 2, LV_PART_MAIN);
-    lv_obj_align(tag_emissivity, LV_ALIGN_TOP_RIGHT, -6, 34);
+    lv_obj_set_pos(tag_emissivity, 6, 66);
     lv_label_set_text(tag_emissivity, "");
 
     // 5. 动态最高温与最低温指示气泡（白底，MAX 红 / MIN 蓝）
@@ -1205,6 +1213,20 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
     lv_obj_set_style_text_align(label_info, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(label_info, LV_ALIGN_CENTER, 0, 0);
     lv_label_set_text(label_info, lang_str(STR_CALIBRATING));
+
+    s_battery_warning = lv_label_create(ui_root);
+    lv_obj_set_size(s_battery_warning, 268, 34);
+    lv_obj_align(s_battery_warning, LV_ALIGN_TOP_MID, 0, 65);
+    lv_obj_set_style_bg_color(s_battery_warning, lv_color_hex(T_DANGER), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_battery_warning, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_battery_warning, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_battery_warning, lang_font(), LV_PART_MAIN);
+    lv_obj_set_style_text_align(s_battery_warning, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_style_radius(s_battery_warning, 8, LV_PART_MAIN);
+    lv_obj_set_style_pad_hor(s_battery_warning, 4, LV_PART_MAIN);
+    lv_label_set_text(s_battery_warning, lang_str(STR_LOW_BATTERY_AUTO_OFF));
+    lv_obj_add_flag(s_battery_warning, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(s_battery_warning, LV_OBJ_FLAG_CLICKABLE);
 
     // 7. 触摸准星与长按滑动列表菜单（蓝色准星）
     touch_cursor = lv_obj_create(ui_root);
@@ -1330,18 +1352,17 @@ void thermal_ui_refresh_language(void)
 {
     /* HUD 上所有文字都在切语言后需要换字体，否则新语言的字形缺失会显示成空白/方块 */
     lv_obj_t *labels[] = {
-        label_title, label_fps_float, label_info,
+        label_fps_float, label_info,
         tag_max, tag_min, tag_fix, tag_emissivity,
-        s_viewer_title,
+        s_viewer_title, s_battery_warning,
     };
     for (size_t i = 0; i < sizeof(labels) / sizeof(labels[0]); i++) {
         if (labels[i]) {
             lv_obj_set_style_text_font(labels[i], lang_font(), LV_PART_MAIN);
         }
     }
-    if (label_title) {
-        lv_label_set_text_fmt(label_title, "%s: %s", lang_str(STR_MODE),
-                              ir_color_get_mode_name(ir_camera_get_color_mode()));
+    if (s_battery_warning) {
+        lv_label_set_text(s_battery_warning, lang_str(STR_LOW_BATTERY_AUTO_OFF));
     }
 
     /* 菜单里的文字是创建时写死的，切换语言后整体重建一次 */
@@ -1368,4 +1389,42 @@ void thermal_ui_refresh_language(void)
         }
         create_settings_menu(s_ui_root);
     }
+}
+
+void thermal_ui_update_battery(int percentage, bool low_battery_warning)
+{
+    if (!example_lvgl_lock(100)) {
+        ESP_LOGW(UI_TAG, "Skipping battery HUD update: LVGL lock timeout");
+        return;
+    }
+
+    if (!s_battery_panel || !s_battery_outline || !s_battery_fill ||
+        !s_battery_cap || !s_battery_warning) {
+        ESP_LOGE(UI_TAG, "Battery HUD is not initialized");
+        example_lvgl_unlock();
+        return;
+    }
+
+    if (percentage < 0) percentage = 0;
+    if (percentage > 100) percentage = 100;
+
+    uint32_t battery_color = (percentage < 20) ? T_DANGER : 0xF4F4FA;
+    lv_color_t color = lv_color_hex(battery_color);
+    lv_obj_set_style_border_color(s_battery_outline, color, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_battery_fill, color, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_battery_cap, color, LV_PART_MAIN);
+    int fill_width = 18 * percentage / 100;
+    if (percentage > 0 && fill_width == 0) {
+        fill_width = 1;
+    }
+    lv_obj_set_width(s_battery_fill, fill_width);
+
+    if (low_battery_warning) {
+        lv_label_set_text(s_battery_warning, lang_str(STR_LOW_BATTERY_AUTO_OFF));
+        lv_obj_clear_flag(s_battery_warning, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_battery_warning, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    example_lvgl_unlock();
 }

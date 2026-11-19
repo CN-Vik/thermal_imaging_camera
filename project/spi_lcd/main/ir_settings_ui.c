@@ -182,10 +182,6 @@ static void save_settings(void)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "failed to save settings: %s", esp_err_to_name(err));
     }
-    if (label_title) {
-        lv_label_set_text_fmt(label_title, "%s: %s", lang_str(STR_MODE),
-                              ir_color_get_mode_name(g_ir_settings.color_mode));
-    }
 }
 
 static void apply_backlight(void)

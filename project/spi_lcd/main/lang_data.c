@@ -70,6 +70,7 @@ static const char * const s_str_table[STR_COUNT][LANG_COUNT] = {
     { "水平", "Horizontal", "Горизонтально", "水平", "가로" },
     { "立即重置", "Reset now", "Сбросить", "今すぐリセット", "지금 초기화" },
     { "检查连接", "Check connection", "Проверить связь", "接続確認", "연결 확인" },
+    { "电量低，5秒后关机", "Low battery: off in 5s", "Низкий заряд: выкл. через 5с", "電池残量低下、5秒後に電源オフ", "배터리 부족, 5초 후 종료" },
 };
 
 const char *lang_name(app_lang_t l) {

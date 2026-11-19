@@ -23,6 +23,7 @@
 #include "lang.h"
 #include "boot_ui.h"
 #include "ir_settings_ui.h"
+#include "battery_monitor.h"
 #include "esp_lcd_touch_cst816s.h"
 #include "driver/i2c_master.h"
 #include "esp_lcd_panel_st7789.h"
@@ -488,5 +489,10 @@ void app_main(void)
     if (xReturned != pdPASS)
     {
         ESP_LOGE(TAG, "ir_camera_task_main creat failed!");
+    }
+
+    esp_err_t battery_err = battery_monitor_start();
+    if (battery_err != ESP_OK) {
+        ESP_LOGE(TAG, "Battery monitor failed to start: %s", esp_err_to_name(battery_err));
     }
 }

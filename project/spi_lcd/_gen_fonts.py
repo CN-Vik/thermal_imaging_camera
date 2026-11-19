@@ -22,6 +22,7 @@ STR_KEYS = [
     "MAX", "MIN", "FIX", "CENTER", "DT", "MODE",
     "CHART_SOURCE", "WAITING_SAMPLES",
     "VERTICAL", "HORIZONTAL", "RESET_NOW", "CHECK_CONNECTION",
+    "LOW_BATTERY_AUTO_OFF",
 ]
 STRINGS = {
     "LANG_TITLE":  {"ZH": "选择语言", "EN": "Select Language", "RU": "Выберите язык", "JA": "言語を選択", "KO": "언어 선택"},
@@ -80,6 +81,7 @@ STRINGS = {
     "HORIZONTAL":        {"ZH": "水平",     "EN": "Horizontal",          "RU": "Горизонтально",      "JA": "水平",           "KO": "가로"},
     "RESET_NOW":         {"ZH": "立即重置", "EN": "Reset now",           "RU": "Сбросить",           "JA": "今すぐリセット", "KO": "지금 초기화"},
     "CHECK_CONNECTION":  {"ZH": "检查连接", "EN": "Check connection",    "RU": "Проверить связь",    "JA": "接続確認",       "KO": "연결 확인"},
+    "LOW_BATTERY_AUTO_OFF": {"ZH": "电量低，5秒后关机", "EN": "Low battery: off in 5s", "RU": "Низкий заряд: выкл. через 5с", "JA": "電池残量低下、5秒後に電源オフ", "KO": "배터리 부족, 5초 후 종료"},
 }
 LANG_NAMES = {"ZH": "中文", "EN": "English", "RU": "Русский", "JA": "日本語", "KO": "한국어"}
 

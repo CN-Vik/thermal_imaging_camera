@@ -9,6 +9,7 @@ idf_component_register(
     REQUIRES 
         freertos
         esp_driver_i2c
+        esp_adc
         esp_lcd   
         driver
         log

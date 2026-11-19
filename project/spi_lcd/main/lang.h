@@ -73,6 +73,7 @@ typedef enum {
     STR_HORIZONTAL,
     STR_RESET_NOW,
     STR_CHECK_CONNECTION,
+    STR_LOW_BATTERY_AUTO_OFF,
     STR_COUNT
 } lang_str_id_t;
 
