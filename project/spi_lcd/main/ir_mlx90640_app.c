@@ -109,7 +109,7 @@ ir_app_settings_t g_ir_settings = {
 /*
  * 时域降噪参数（针对 16Hz 下 MLX90640 底噪优化）：
  */
-#define TEMP_FILTER_ALPHA_MIN           0.04f
+#define TEMP_FILTER_ALPHA_MIN           0.12f
 #define TEMP_FILTER_ALPHA_MAX           0.85f
 #define TEMP_FILTER_NOISE_FLOOR_C       0.75f
 #define TEMP_FILTER_MOTION_SAT_C        2.20f
@@ -143,7 +143,7 @@ ir_app_settings_t g_ir_settings = {
 #define IR_RESYNC_FRAMES       2
 
 #define IR_SCREEN_W     280
-#define IR_SCREEN_H     MLX_INTERP_H
+#define IR_SCREEN_H     MLX_VISIBLE_H
 #define IR_TAG_GUESS_W  108
 #define IR_TAG_GUESS_H  26
 
@@ -486,7 +486,7 @@ static float min_valid_temperature(const float *values)
  */
 static void spatial_bilateral_denoise(const float *src, float *dst, int w, int h)
 {
-    const float edge_thresh_flat = 1.65f;
+    const float edge_thresh_flat = 1.00f;
     const float edge_thresh_hot_bleed = 0.65f; // 阻止高温邻居把低温指缝拉高
 
     for (int r = 0; r < h; r++) {
@@ -545,8 +545,8 @@ static void spatial_bilateral_denoise(const float *src, float *dst, int w, int h
                 }
             }
 
-            float sum_smooth = center * 4.0f;
-            float w_total = 4.0f;
+            float sum_smooth = center * 6.0f;
+            float w_total = 6.0f;
 
             for (int i = 0; i < 4; i++) {
                 if (ir_temperature_is_valid(ortho[i])) {
@@ -558,7 +558,7 @@ static void spatial_bilateral_denoise(const float *src, float *dst, int w, int h
                                      : edge_thresh_flat;
                     if (d_o < thresh_o) {
                         float t = 1.0f - (d_o / thresh_o);
-                        float w_o = 2.0f * t * t;
+                        float w_o = 1.0f * t * t;
                         sum_smooth += ortho[i] * w_o;
                         w_total += w_o;
                     }
@@ -573,7 +573,7 @@ static void spatial_bilateral_denoise(const float *src, float *dst, int w, int h
                                      : edge_thresh_flat;
                     if (d_d < thresh_d) {
                         float t = 1.0f - (d_d / thresh_d);
-                        float w_d = 1.0f * t * t;
+                        float w_d = 0.25f * t * t;
                         sum_smooth += diag[i] * w_d;
                         w_total += w_d;
                     }
@@ -866,7 +866,7 @@ void ir_camera_settings_reset(void)
     ir_camera_chart_clear();
 }
 
-/* 获取当前正在显示的热成像帧（280x210 RGB565），未就绪时返回 NULL */
+/* 获取当前正在显示的热成像帧（280x240 RGB565），未就绪时返回 NULL */
 const uint8_t *ir_camera_get_frame(void)
 {
     return s_thermal_img_dsc.data;
@@ -1079,7 +1079,7 @@ static void bilinear_scale_fullscreen_1to1(const uint8_t *src, int src_w, int sr
     }
 }
 
-/* 把归一化矩阵渲染为 280x210 RGB565（用指定色彩模式） */
+/* 把归一化矩阵渲染为 280x240 RGB565（用指定色彩模式） */
 void ir_camera_render_norm(const uint8_t *norm, ir_color_mode_t mode, uint16_t *dst)
 {
     if (!norm || !dst) return;
@@ -1435,7 +1435,7 @@ void ir_camera_task_main(void *pvParameters)
                 median_stage_min = min_valid_temperature(median_temp);
             }
 
-            // 4. 按设置页选择的滤波算法生成最终的测温/显示矩阵（默认与原版双边滤波完全一致）
+            // 4. 按设置页选择的滤波算法生成测温/显示矩阵；默认双边滤波优先保留中心像素与边缘
             apply_spatial_filter(filtered_temp, median_temp, spatial_temp,
                                  (int)g_ir_settings.filter_mode);
 

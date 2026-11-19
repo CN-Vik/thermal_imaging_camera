@@ -935,7 +935,7 @@ static void screen_touch_event_cb(lv_event_t *e)
         lv_point_t p;
         lv_indev_get_point(indev, &p);
 
-        if (g_ir_settings.label_fixture && p.y < MLX_INTERP_H) {
+        if (g_ir_settings.label_fixture && p.y < MLX_VISIBLE_H) {
             g_ir_settings.fixture_px_x = (int)ui_clamp(p.x, 0, UI_SCREEN_W - 1);
             g_ir_settings.fixture_px_y = (int)ui_clamp(p.y, 0, MLX_INTERP_H - 1);
             if (s_fixture_save_timer) {
@@ -1094,7 +1094,7 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
     lv_obj_set_scrollbar_mode(ui_root, LV_SCROLLBAR_MODE_OFF);
     s_ui_root = ui_root;
 
-    // 1. 按 MLX90640 原生宽高比显示 280x210 热像
+    // 1. 保持旧版 280x240 热像映射；底部温度栏覆盖最后 30 行
     img_thermal = lv_img_create(ui_root);
     lv_img_set_src(img_thermal, &s_thermal_img_dsc);
     lv_img_set_zoom(img_thermal, 256);
@@ -1167,8 +1167,8 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
     // 5. 底部三段温度栏
     lv_obj_t *bottom_capsule = lv_obj_create(ui_root);
     lv_obj_remove_style_all(bottom_capsule);
-    lv_obj_set_size(bottom_capsule, UI_SCREEN_W, UI_SCREEN_H - MLX_INTERP_H);
-    lv_obj_set_pos(bottom_capsule, 0, MLX_INTERP_H);
+    lv_obj_set_size(bottom_capsule, UI_SCREEN_W, UI_SCREEN_H - MLX_VISIBLE_H);
+    lv_obj_set_pos(bottom_capsule, 0, MLX_VISIBLE_H);
     lv_obj_set_style_bg_color(bottom_capsule, lv_color_hex(0x08051D), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(bottom_capsule, LV_OPA_30, LV_PART_MAIN);
     lv_obj_set_style_border_width(bottom_capsule, 0, LV_PART_MAIN);

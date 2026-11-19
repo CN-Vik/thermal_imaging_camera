@@ -17,10 +17,11 @@ extern "C" {
 #define MLX_W                   MLX_RAW_W
 #define MLX_H                   MLX_RAW_H
 
-// 热像图保持 MLX90640 4:3 比例，显示区域为横屏 280x210
+// 保持旧版横屏 280x240 热像采样与坐标映射；底部温度栏覆盖最后 30 行
 #define MLX_INTERP_W            280
-#define MLX_INTERP_H            210
+#define MLX_INTERP_H            240
 #define MLX_INTERP_PIXELS       (MLX_INTERP_W * MLX_INTERP_H)
+#define MLX_VISIBLE_H           210
 
 #define MLX90640_ADDR           0x33
 #define TA_SHIFT                8
