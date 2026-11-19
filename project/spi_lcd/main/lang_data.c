@@ -16,6 +16,7 @@ static const char * const s_lang_names[LANG_COUNT] = {
 static const char * const s_str_table[STR_COUNT][LANG_COUNT] = {
     { "选择语言", "Select Language", "Выберите язык", "言語を選択", "언어 선택" },
     { "模式配置", "Mode Config", "Настройки", "モード設定", "모드 설정" },
+    { "主菜单", "Main menu", "Главное меню", "メインメニュー", "메인 메뉴" },
     { "色彩模式", "Color Mode", "Цветовой режим", "カラーモード", "컬러 모드" },
     { "关机", "Power Off", "Выключение", "電源オフ", "전원 끄기" },
     { "返回", "Back", "Назад", "戻る", "뒤로" },
@@ -36,12 +37,17 @@ static const char * const s_str_table[STR_COUNT][LANG_COUNT] = {
     { "基本设置", "Basic settings", "Основные", "基本設定", "기본 설정" },
     { "高级设置", "Advanced settings", "Дополнительно", "詳細設定", "고급 설정" },
     { "其他", "Other", "Прочее", "その他", "기타" },
+    { "其他设置", "Other settings", "Прочие настройки", "その他の設定", "기타 설정" },
     { "色彩样式", "Color style", "Цветовой стиль", "カラースタイル", "색상 스타일" },
     { "温度标签", "Temperature label", "Метки температуры", "温度ラベル", "온도 라벨" },
     { "曲线", "Chart", "График", "グラフ", "차트" },
     { "旋转", "Rotate", "Поворот", "回転", "회전" },
     { "镜像", "Mirror", "Зеркало", "ミラー", "미러" },
     { "温度单位", "Temperature scale", "Шкала температуры", "温度単位", "온도 단위" },
+    { "摄氏度", "Celsius", "Цельсий", "摂氏", "섭씨" },
+    { "华氏度", "Fahrenheit", "Фаренгейт", "華氏", "화씨" },
+    { "开尔文", "Kelvin", "Кельвин", "ケルビン", "켈빈" },
+    { "兰氏度", "Rankine", "Ранкин", "ランキン", "랭킨" },
     { "屏幕", "Screen", "Экран", "画面", "화면" },
     { "滤波", "Filter", "Фильтр", "フィルター", "필터" },
     { "发射率", "Emissivity", "Излучательность", "放射率", "방사율" },
@@ -96,4 +102,21 @@ const lv_font_t *lang_font_for(app_lang_t l) {
 
 const lv_font_t *lang_font(void) {
     return lang_font_for(lang_get());
+}
+
+extern const lv_font_t app_font_zh_menu;
+extern const lv_font_t app_font_en_menu;
+extern const lv_font_t app_font_ru_menu;
+extern const lv_font_t app_font_ja_menu;
+extern const lv_font_t app_font_ko_menu;
+
+const lv_font_t *lang_menu_font(void) {
+    switch (lang_get()) {
+    case LANG_ZH: return &app_font_zh_menu;
+    case LANG_EN: return &app_font_en_menu;
+    case LANG_RU: return &app_font_ru_menu;
+    case LANG_JA: return &app_font_ja_menu;
+    case LANG_KO: return &app_font_ko_menu;
+    default: return &app_font_en_menu;
+    }
 }

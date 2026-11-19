@@ -1562,5 +1562,6 @@ const lv_font_t app_font_ja = {
     .subpx = LV_FONT_SUBPX_NONE,
     .underline_position = -1,
     .underline_thickness = 1,
+    .fallback = &lv_font_montserrat_14,
     .dsc = &font_dsc
 };

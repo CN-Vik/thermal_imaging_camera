@@ -19,6 +19,7 @@ typedef enum {
 typedef enum {
     STR_LANG_TITLE = 0,
     STR_MODE_CONFIG,
+    STR_MAIN_MENU,
     STR_COLOR_MODE,
     STR_POWER_OFF,
     STR_BACK,
@@ -39,12 +40,17 @@ typedef enum {
     STR_BASIC_SETTINGS,
     STR_ADVANCED_SETTINGS,
     STR_OTHER,
+    STR_OTHER_SETTINGS,
     STR_COLOR_STYLE,
     STR_TEMP_LABEL,
     STR_CHART,
     STR_ROTATE,
     STR_MIRROR,
     STR_TEMP_SCALE,
+    STR_CELSIUS,
+    STR_FAHRENHEIT,
+    STR_KELVIN,
+    STR_RANKINE,
     STR_SCREEN,
     STR_FILTER,
     STR_EMISSIVITY,
@@ -81,6 +87,7 @@ const char *lang_name(app_lang_t l);
 const char *lang_str(lang_str_id_t id);
 const lv_font_t *lang_font(void);
 const lv_font_t *lang_font_for(app_lang_t l);
+const lv_font_t *lang_menu_font(void);
 
 esp_err_t lang_init(void);
 app_lang_t lang_get(void);

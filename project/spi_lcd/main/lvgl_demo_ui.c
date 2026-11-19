@@ -48,6 +48,11 @@ static inline lv_coord_t ui_clamp(lv_coord_t v, lv_coord_t lo, lv_coord_t hi)
     return v;
 }
 
+static const lv_font_t *metric_info_font(void)
+{
+    return lang_get() == LANG_EN ? &lv_font_montserrat_14 : lang_font();
+}
+
 lv_obj_t *img_thermal = NULL;
 lv_obj_t *label_max_info = NULL;
 lv_obj_t *label_min_info = NULL;
@@ -110,7 +115,6 @@ static bool menu_click_guard(void);
 
 /* 左右滑动状态：按下记录起点，移动过程中达到阈值立即切换（不依赖松手事件） */
 static lv_point_t s_swipe_start = {0, 0};
-static bool s_gallery_from_settings = false;
 static bool s_swipe_tracking = false;
 static bool s_swipe_fired    = false;
 static bool s_swipe_moved    = false;
@@ -313,10 +317,6 @@ static void menu_backdrop_cancel_cb(lv_event_t *e)
     ir_camera_set_color_mode(s_backup_mode);
     if (s_menu_backdrop) {
         lv_obj_add_flag(s_menu_backdrop, LV_OBJ_FLAG_HIDDEN);
-    }
-    if (s_gallery_from_settings) {
-        s_gallery_from_settings = false;
-        ir_settings_ui_open();
     }
 }
 
@@ -611,14 +611,6 @@ static void rebuild_gallery_list(void)
 static void menu_back_to_main_cb(lv_event_t *e)
 {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
-    if (s_gallery_from_settings) {
-        s_gallery_from_settings = false;
-        if (s_menu_backdrop) {
-            lv_obj_add_flag(s_menu_backdrop, LV_OBJ_FLAG_HIDDEN);
-        }
-        ir_settings_ui_open();
-        return;
-    }
     menu_show_main();
 }
 
@@ -932,10 +924,6 @@ static void screen_touch_event_cb(lv_event_t *e)
             if (abs(dx) > MENU_SWIPE_EXIT_DX && abs(dx) > abs(dy) * 2) {
                 ir_camera_set_color_mode(s_backup_mode);
                 lv_obj_add_flag(s_menu_backdrop, LV_OBJ_FLAG_HIDDEN);
-                if (s_gallery_from_settings) {
-                    s_gallery_from_settings = false;
-                    ir_settings_ui_open();
-                }
             }
             s_swipe_tracking = false;
         }
@@ -1117,8 +1105,8 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
 
     s_battery_panel = lv_obj_create(ui_root);
     lv_obj_remove_style_all(s_battery_panel);
-    lv_obj_set_size(s_battery_panel, 34, 20);
-    lv_obj_set_pos(s_battery_panel, 228, 8);
+    lv_obj_set_size(s_battery_panel, 36, 20);
+    lv_obj_set_pos(s_battery_panel, 220, 8);
     lv_obj_set_style_bg_color(s_battery_panel, lv_color_black(), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(s_battery_panel, LV_OPA_50, LV_PART_MAIN);
     lv_obj_set_style_border_width(s_battery_panel, 0, LV_PART_MAIN);
@@ -1127,8 +1115,8 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
 
     s_battery_outline = lv_obj_create(s_battery_panel);
     lv_obj_remove_style_all(s_battery_outline);
-    lv_obj_set_size(s_battery_outline, 22, 12);
-    lv_obj_set_pos(s_battery_outline, 4, 4);
+    lv_obj_set_size(s_battery_outline, 27, 14);
+    lv_obj_set_pos(s_battery_outline, 3, 3);
     lv_obj_set_style_bg_opa(s_battery_outline, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_border_width(s_battery_outline, 2, LV_PART_MAIN);
     lv_obj_set_style_border_color(s_battery_outline, lv_color_hex(0xF4F4FA), LV_PART_MAIN);
@@ -1139,7 +1127,7 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
     s_battery_fill = lv_obj_create(s_battery_outline);
     lv_obj_remove_style_all(s_battery_fill);
     lv_obj_set_pos(s_battery_fill, 2, 1);
-    lv_obj_set_size(s_battery_fill, 0, 6);
+    lv_obj_set_size(s_battery_fill, 0, 8);
     lv_obj_set_style_bg_color(s_battery_fill, lv_color_white(), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(s_battery_fill, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(s_battery_fill, 1, LV_PART_MAIN);
@@ -1147,8 +1135,8 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
 
     s_battery_cap = lv_obj_create(s_battery_panel);
     lv_obj_remove_style_all(s_battery_cap);
-    lv_obj_set_size(s_battery_cap, 3, 6);
-    lv_obj_set_pos(s_battery_cap, 27, 7);
+    lv_obj_set_size(s_battery_cap, 3, 8);
+    lv_obj_set_pos(s_battery_cap, 30, 6);
     lv_obj_set_style_bg_color(s_battery_cap, lv_color_white(), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(s_battery_cap, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_clear_flag(s_battery_cap, LV_OBJ_FLAG_CLICKABLE);
@@ -1202,7 +1190,7 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
         lv_obj_set_size(*metric_labels[i], 92, 24);
         lv_obj_set_pos(*metric_labels[i], i * 94, 3);
         lv_obj_set_style_text_color(*metric_labels[i], lv_color_hex(metric_colors[i]), LV_PART_MAIN);
-        lv_obj_set_style_text_font(*metric_labels[i], &lv_font_montserrat_14, LV_PART_MAIN);
+        lv_obj_set_style_text_font(*metric_labels[i], metric_info_font(), LV_PART_MAIN);
         lv_obj_set_style_text_align(*metric_labels[i], LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
         lv_label_set_long_mode(*metric_labels[i], LV_LABEL_LONG_CLIP);
         lv_label_set_text(*metric_labels[i], "--");
@@ -1327,18 +1315,6 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
     lv_obj_add_event_cb(scr, screen_touch_event_cb, LV_EVENT_ALL, NULL);
 }
 
-void thermal_ui_show_gallery(void)
-{
-    if (!s_menu_backdrop) return;
-    s_gallery_from_settings = true;
-    s_backup_mode = ir_camera_get_color_mode();
-    s_pending_mode = s_backup_mode;
-    s_menu_open_ms = lv_tick_get();
-    menu_show_gallery();
-    lv_obj_clear_flag(s_menu_backdrop, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_move_foreground(s_menu_backdrop);
-}
-
 /* 全屏遮挡层（调色板/相册/语言/照片查看器）是否可见。
  * IR 任务据此在热像不可见时降低传感器刷新率以降耗降温。 */
 bool thermal_ui_view_blocking(void)
@@ -1356,13 +1332,18 @@ void thermal_ui_refresh_language(void)
 {
     /* HUD 上所有文字都在切语言后需要换字体，否则新语言的字形缺失会显示成空白/方块 */
     lv_obj_t *labels[] = {
-        label_max_info, label_min_info, label_fix_info,
         tag_max, tag_min, tag_fix,
         s_viewer_title, s_battery_warning,
     };
     for (size_t i = 0; i < sizeof(labels) / sizeof(labels[0]); i++) {
         if (labels[i]) {
             lv_obj_set_style_text_font(labels[i], lang_font(), LV_PART_MAIN);
+        }
+    }
+    lv_obj_t *metric_labels[] = {label_max_info, label_min_info, label_fix_info};
+    for (size_t i = 0; i < sizeof(metric_labels) / sizeof(metric_labels[0]); i++) {
+        if (metric_labels[i]) {
+            lv_obj_set_style_text_font(metric_labels[i], metric_info_font(), LV_PART_MAIN);
         }
     }
     if (s_battery_warning) {
@@ -1415,9 +1396,9 @@ void thermal_ui_update_battery(int percentage, bool low_battery_warning)
     uint32_t battery_color = (percentage < 20) ? T_DANGER : 0xF4F4FA;
     lv_color_t color = lv_color_hex(battery_color);
     lv_obj_set_style_border_color(s_battery_outline, color, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(s_battery_fill, color, LV_PART_MAIN);
     lv_obj_set_style_bg_color(s_battery_cap, color, LV_PART_MAIN);
-    int fill_width = 18 * percentage / 100;
+    lv_obj_set_style_bg_color(s_battery_fill, color, LV_PART_MAIN);
+    int fill_width = 21 * percentage / 100;
     if (percentage > 0 && fill_width == 0) {
         fill_width = 1;
     }

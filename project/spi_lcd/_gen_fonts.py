@@ -9,12 +9,13 @@ FONTS = r"C:\Windows\Fonts"
 LANG_ORDER = ["ZH", "EN", "RU", "JA", "KO"]
 
 STR_KEYS = [
-    "LANG_TITLE", "MODE_CONFIG", "COLOR_MODE", "POWER_OFF",
+    "LANG_TITLE", "MODE_CONFIG", "MAIN_MENU", "COLOR_MODE", "POWER_OFF",
     "BACK", "OK", "POWER", "SELECT_FMT", "CALIBRATING",
     "LANGUAGE", "CAPTURE", "GALLERY", "DELETE", "DELETE_ALL",
     "SAVED", "NO_PHOTOS", "CLOSE", "PHOTO", "FULL",
-    "BASIC_SETTINGS", "ADVANCED_SETTINGS", "OTHER", "COLOR_STYLE",
+    "BASIC_SETTINGS", "ADVANCED_SETTINGS", "OTHER", "OTHER_SETTINGS", "COLOR_STYLE",
     "TEMP_LABEL", "CHART", "ROTATE", "MIRROR", "TEMP_SCALE",
+    "CELSIUS", "FAHRENHEIT", "KELVIN", "RANKINE",
     "SCREEN", "FILTER", "EMISSIVITY", "GAMMA", "CALIBRATION",
     "VISIT_WEBPAGE", "FACTORY_RESET", "ABOUT", "REVERSE",
     "BRIGHTNESS", "AUTO_SLEEP", "OFFSET", "RESET_OFFSET",
@@ -27,6 +28,7 @@ STR_KEYS = [
 STRINGS = {
     "LANG_TITLE":  {"ZH": "选择语言", "EN": "Select Language", "RU": "Выберите язык", "JA": "言語を選択", "KO": "언어 선택"},
     "MODE_CONFIG": {"ZH": "模式配置", "EN": "Mode Config",     "RU": "Настройки",       "JA": "モード設定",   "KO": "모드 설정"},
+    "MAIN_MENU":   {"ZH": "主菜单",   "EN": "Main menu",       "RU": "Главное меню",   "JA": "メインメニュー", "KO": "메인 메뉴"},
     "COLOR_MODE":  {"ZH": "色彩模式", "EN": "Color Mode",     "RU": "Цветовой режим", "JA": "カラーモード", "KO": "컬러 모드"},
     "POWER_OFF":   {"ZH": "关机",     "EN": "Power Off",      "RU": "Выключение",     "JA": "電源オフ",     "KO": "전원 끄기"},
     "BACK":        {"ZH": "返回",     "EN": "Back",           "RU": "Назад",          "JA": "戻る",         "KO": "뒤로"},
@@ -47,12 +49,17 @@ STRINGS = {
     "BASIC_SETTINGS":    {"ZH": "基本设置", "EN": "Basic settings",    "RU": "Основные",            "JA": "基本設定",       "KO": "기본 설정"},
     "ADVANCED_SETTINGS": {"ZH": "高级设置", "EN": "Advanced settings", "RU": "Дополнительно",      "JA": "詳細設定",       "KO": "고급 설정"},
     "OTHER":             {"ZH": "其他",     "EN": "Other",             "RU": "Прочее",             "JA": "その他",         "KO": "기타"},
+    "OTHER_SETTINGS":    {"ZH": "其他设置", "EN": "Other settings",   "RU": "Прочие настройки",    "JA": "その他の設定",   "KO": "기타 설정"},
     "COLOR_STYLE":       {"ZH": "色彩样式", "EN": "Color style",       "RU": "Цветовой стиль",     "JA": "カラースタイル", "KO": "색상 스타일"},
     "TEMP_LABEL":        {"ZH": "温度标签", "EN": "Temperature label", "RU": "Метки температуры",  "JA": "温度ラベル",     "KO": "온도 라벨"},
     "CHART":             {"ZH": "曲线",     "EN": "Chart",             "RU": "График",             "JA": "グラフ",         "KO": "차트"},
     "ROTATE":            {"ZH": "旋转",     "EN": "Rotate",            "RU": "Поворот",            "JA": "回転",           "KO": "회전"},
     "MIRROR":            {"ZH": "镜像",     "EN": "Mirror",            "RU": "Зеркало",            "JA": "ミラー",         "KO": "미러"},
     "TEMP_SCALE":        {"ZH": "温度单位", "EN": "Temperature scale", "RU": "Шкала температуры",  "JA": "温度単位",       "KO": "온도 단위"},
+    "CELSIUS":           {"ZH": "摄氏度",   "EN": "Celsius",           "RU": "Цельсий",         "JA": "摂氏",           "KO": "섭씨"},
+    "FAHRENHEIT":        {"ZH": "华氏度",   "EN": "Fahrenheit",        "RU": "Фаренгейт",       "JA": "華氏",           "KO": "화씨"},
+    "KELVIN":            {"ZH": "开尔文",   "EN": "Kelvin",            "RU": "Кельвин",         "JA": "ケルビン",       "KO": "켈빈"},
+    "RANKINE":           {"ZH": "兰氏度",   "EN": "Rankine",           "RU": "Ранкин",          "JA": "ランキン",       "KO": "랭킨"},
     "SCREEN":            {"ZH": "屏幕",     "EN": "Screen",            "RU": "Экран",              "JA": "画面",           "KO": "화면"},
     "FILTER":            {"ZH": "滤波",     "EN": "Filter",            "RU": "Фильтр",             "JA": "フィルター",     "KO": "필터"},
     "EMISSIVITY":        {"ZH": "发射率",   "EN": "Emissivity",        "RU": "Излучательность",    "JA": "放射率",         "KO": "방사율"},
@@ -96,6 +103,7 @@ LANG_NAMES = {"ZH": "中文", "EN": "English", "RU": "Русский", "JA": "�
 UI_FONT_FAMILY = "NotoSansSC"
 UI_FONT_WEIGHT = "Regular"     # "Regular" / "Medium" / "Bold"
 UI_FONT_SIZE   = 18            # 16 → 18（+2 号）
+MENU_FONT_SIZE = 22
 # 英文/数字使用 LVGL 内置 Montserrat，字号需与 sdkconfig
 # CONFIG_LV_FONT_MONTSERRAT_<N> 保持一致
 UI_ASCII_FONT_SIZE = UI_FONT_SIZE
@@ -124,6 +132,7 @@ FONT_SPECS = {
     "KO": (os.path.join(FONTS, "malgun.ttf"), 0, UI_FONT_SIZE),
     # 俄文用 Segoe UI（Windows 现代 UI 字体），比 Arial 更接近设备界面观感
     "RU": (os.path.join(FONTS, "segoeui.ttf"), 0, UI_FONT_SIZE),
+    "EN": (os.path.join(FONTS, "segoeui.ttf"), 0, UI_FONT_SIZE),
 }
 
 def collect_chars(lang):
@@ -176,8 +185,10 @@ def render_glyph(font, ch):
     return {"adv_w": adv_w, "box_w": row_w, "box_h": box_h, "ofs_x": ofs_x,
             "ofs_y": ofs_y, "bitmap": bytes(out)}
 
-def gen_font(lang):
-    ttf, idx, size = FONT_SPECS[lang]
+def gen_font(lang, size=None, suffix=""):
+    ttf, idx, default_size = FONT_SPECS[lang]
+    if size is None:
+        size = default_size
     font = ImageFont.truetype(ttf, size, index=idx)
     ascent, descent = font.getmetrics()
 
@@ -232,7 +243,7 @@ def gen_font(lang):
         script_unicode_list = [cp - rstart for cp in script_cps]
         script_cmap = (rstart, rlen, script_start_id, script_unicode_list)
 
-    name = "app_font_" + lang.lower()
+    name = "app_font_" + lang.lower() + suffix
     guard = name.upper()
 
     L = []
@@ -292,6 +303,7 @@ def gen_font(lang):
     L.append("    .subpx = LV_FONT_SUBPX_NONE,")
     L.append("    .underline_position = -1,")
     L.append("    .underline_thickness = 1,")
+    L.append("    .fallback = &lv_font_montserrat_14,")
     L.append("    .dsc = &font_dsc")
     L.append("};")
     L.append("")
@@ -328,6 +340,7 @@ def gen_lang_header_and_data():
     H.append("const char *lang_str(lang_str_id_t id);")
     H.append("const lv_font_t *lang_font(void);")
     H.append("const lv_font_t *lang_font_for(app_lang_t l);")
+    H.append("const lv_font_t *lang_menu_font(void);")
     H.append("")
     H.append("esp_err_t lang_init(void);")
     H.append("app_lang_t lang_get(void);")
@@ -385,12 +398,26 @@ def gen_lang_header_and_data():
     D.append("    return lang_font_for(lang_get());")
     D.append("}")
     D.append("")
+    for l in LANG_ORDER:
+        D.append("extern const lv_font_t app_font_%s_menu;" % l.lower())
+    D.append("")
+    D.append("const lv_font_t *lang_menu_font(void) {")
+    D.append("    switch (lang_get()) {")
+    for l in LANG_ORDER:
+        D.append("    case LANG_%s: return &app_font_%s_menu;" % (l, l.lower()))
+    D.append("    default: return &app_font_en_menu;")
+    D.append("    }")
+    D.append("}")
+    D.append("")
     open(os.path.join(MAIN, "lang_data.c"), "w", encoding="utf-8").write("\n".join(D))
     print("wrote lang.h, lang_data.c")
 
 if __name__ == "__main__":
     for l in ["ZH", "JA", "KO", "RU"]:
         n, lh, bl, ng, nb = gen_font(l)
+        print("font %s: line_height=%d base_line=%d glyphs=%d bitmap_bytes=%d" % (n, lh, bl, ng, nb))
+    for l in LANG_ORDER:
+        n, lh, bl, ng, nb = gen_font(l, MENU_FONT_SIZE, "_menu")
         print("font %s: line_height=%d base_line=%d glyphs=%d bitmap_bytes=%d" % (n, lh, bl, ng, nb))
     gen_lang_header_and_data()
     print("DONE")
