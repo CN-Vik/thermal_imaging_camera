@@ -907,7 +907,7 @@ ESP32-S3完全可以。
 
 一台**手持式红外热成像相机**的完整固件：
 
-- **实时热像**：MLX90640 32×24 红外阵列 → 双线性插值放大到 280×240 → 伪彩色 → 屏幕
+- **实时热像**：MLX90640 32×24 红外阵列 → 双线性插值到保持原始 4:3 比例的 280×210 → 伪彩色；底部 280×30 显示温度栏
 - **9 种伪彩**：白热 / 黑热 / 彩虹 / 铁红 / 高热红 / 熔岩 / 极地 / 绿热 / 冷热双警示
 - **测温**：全画面最高温 / 最低温 / 中心点（或自定义定点）温度，带十字标记与气泡标签
 - **温度曲线**：最近 30 秒采样趋势图，可选采样源（中心 / 定点 / 最高 / 最低），显示 X 时间轴 + Y 温度轴刻度
@@ -1076,9 +1076,9 @@ project/spi_lcd/
 |---|---|---|---|
 | LVGL 绘制缓冲 ×2 | 240 × 45 × 2 B = **21,600 B** 各一份 | 内部 RAM（`MALLOC_CAP_DMA`） | `app_main.c` |
 | 横屏旋转临时缓冲 | **10,240 B**（`LV_DISP_ROT_MAX_BUF`） | LVGL 堆 | LVGL 内部 |
-| 热像显示缓冲 ×2 | 280 × 240 × 2 B = **134,400 B** 各一份 | **PSRAM** | `ir_camera_app_init()` |
+| 热像显示缓冲 ×2 | 280 × 210 × 2 B = **117,600 B** 各一份 | **PSRAM** | `ir_camera_app_init()` |
 | MLX 工作数组 | ≈ 17 KB（834×2 + 768×4×4 + 768 + 参数结构体） | 内部堆 | `ir_camera_task_main()` |
-| 照片渲染缓冲 | 134,400 B | PSRAM 优先 | `lvgl_dispaly_ir_mlx90640()` |
+| 照片渲染缓冲 | 117,600 B | PSRAM 优先 | `lvgl_dispaly_ir_mlx90640()` |
 
 - LVGL 自身堆走**系统堆**（`CONFIG_LV_MEM_CUSTOM=y`），不再受 128 KB 内置池限制。
 - 若 PSRAM 分配失败，第二块热像缓冲退化为与第一块同一地址（单缓冲模式，`s_display_buf[0] == s_display_buf[1]`）。
@@ -1153,7 +1153,7 @@ MLX90640 (I2C, 16 Hz, chess 模式)
    ▼
 [9] temperature_to_norm_u8()    温度 → 0..255（含 gamma 曲线）
    ▼
-[10] bilinear_scale_fullscreen_1to1()   32×24 → 280×240，同时查 256 级 LUT 得到 RGB565
+[10] bilinear_scale_fullscreen_1to1()   32×24 → 280×210，同时查 256 级 LUT 得到 RGB565
    ▼
 [11] 画标记 + 写 PSRAM 缓冲 + 换指针 + 持锁通知 LVGL
 ```
@@ -1246,7 +1246,7 @@ dst[i] = (uint8_t)(norm * 255.0f + 0.5f);
 `0.65*gamma + 0.35*linear` 的设计目的：压低背景暗部噪点，同时保住高温区和边缘细节。
 
 #### [10] 双线性插值 + 查表上色
-`bilinear_scale_fullscreen_1to1()` 把 32×24 的 `uint8` 归一化矩阵放大到 280×240 的 RGB565：
+`bilinear_scale_fullscreen_1to1()` 把 32×24 的 `uint8` 归一化矩阵放大到保持 4:3 比例的 280×210 RGB565：
 - 用定点数（`<<16` 步进）算权重，避免每像素浮点除法
 - 每像素 4 邻域加权 → 查 256 级 `s_color_lut[]` → 直接得到 RGB565
 - **同时处理旋转/镜像**（见 5.4）
@@ -1329,7 +1329,7 @@ disp_drv.sw_rotate   = 1;          // 让 LVGL 做软件旋转
 ### 6.2 双缓冲
 
 ```c
-static uint16_t *s_display_buf[2];   // 各 280×240 RGB565 = 134,400 B，在 PSRAM
+static uint16_t *s_display_buf[2];   // 各 280×210 RGB565 = 117,600 B，在 PSRAM
 static uint8_t   s_back_idx = 0;     // 当前可写的那块
 ```
 流程：
@@ -1378,13 +1378,10 @@ static uint8_t   s_back_idx = 0;     // 当前可写的那块
 
 ```
 ui_root
-├── img_thermal          全屏热像图（280×240，zoom=256 即 1:1）
-├── top_capsule          顶部标题胶囊：MODE: 铁红
-├── label_fps_float      左上 FPS 药丸
-├── tag_emissivity       右上发射率药丸（e:0.95）
+├── img_thermal          等比例热像图（280×210，zoom=256 即 1:1）
 ├── tag_max / tag_min    最高/最低温气泡（跟随菱形标记定位）
 ├── tag_fix              定点温度气泡（默认隐藏）
-├── bottom_capsule       底部信息卡：MAX/MIN/中心或定点/温差
+├── bottom_capsule       半透明底部温度栏（280×30）：MAX/MIN/CEN 或 FIX
 ├── touch_cursor         触摸准星（30px 圆环，按下显示）
 ├── touch_label          X/Y 坐标显示
 ├── s_toast              居中提示条（2 s 消失）
@@ -1620,7 +1617,7 @@ python _gen_fonts.py
 | +792 | ~3.2 KB | 填充（未用） |
 
 设计要点：
-- **不存图像，存温度**。280×240 RGB565 要 134 KB，存归一化矩阵只要 768 B（**约 170 倍压缩**），查看时用 `ir_camera_render_norm()` 按当前配色重新渲染
+- **不存图像，存温度**。280×210 RGB565 要约 115 KiB，存归一化矩阵只要 768 B（**约 150 倍压缩**），查看时用 `ir_camera_render_norm()` 按当前配色重新渲染
 - 分区 2 MB ÷ 4 KB = **最多 512 张**
 - 删除 = 只擦头 4 KB 扇区（把 `valid` 变成 0xFF），不整片擦除
 - `photo_count()` 每次都扫一遍所有槽位（512 次 4 B 读取），调用频率低，可接受

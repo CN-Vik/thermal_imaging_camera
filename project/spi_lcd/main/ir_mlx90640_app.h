@@ -17,9 +17,9 @@ extern "C" {
 #define MLX_W                   MLX_RAW_W
 #define MLX_H                   MLX_RAW_H
 
-// 热像图作为全屏底图铺满整块 ST7789 240x280 物理屏（UI 已旋转为横屏 280x240）
+// 热像图保持 MLX90640 4:3 比例，显示区域为横屏 280x210
 #define MLX_INTERP_W            280
-#define MLX_INTERP_H            240
+#define MLX_INTERP_H            210
 #define MLX_INTERP_PIXELS       (MLX_INTERP_W * MLX_INTERP_H)
 
 #define MLX90640_ADDR           0x33
@@ -102,12 +102,12 @@ extern ir_app_settings_t g_ir_settings;
 // 导出底图描述符与半透明 HUD 控件
 extern lv_img_dsc_t s_thermal_img_dsc;
 extern lv_obj_t *img_thermal;
-extern lv_obj_t *label_fps_float;
-extern lv_obj_t *label_info;
+extern lv_obj_t *label_max_info;
+extern lv_obj_t *label_min_info;
+extern lv_obj_t *label_fix_info;
 extern lv_obj_t *tag_max;
 extern lv_obj_t *tag_min;
 extern lv_obj_t *tag_fix;
-extern lv_obj_t *tag_emissivity;
 
 esp_err_t ir_camera_app_init(void);
 esp_err_t ir_camera_settings_load(void);

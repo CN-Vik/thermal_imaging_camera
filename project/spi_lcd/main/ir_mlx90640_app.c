@@ -143,7 +143,7 @@ ir_app_settings_t g_ir_settings = {
 #define IR_RESYNC_FRAMES       2
 
 #define IR_SCREEN_W     280
-#define IR_SCREEN_H     240
+#define IR_SCREEN_H     MLX_INTERP_H
 #define IR_TAG_GUESS_W  108
 #define IR_TAG_GUESS_H  26
 
@@ -866,7 +866,7 @@ void ir_camera_settings_reset(void)
     ir_camera_chart_clear();
 }
 
-/* 获取当前正在显示的热成像帧（280x240 RGB565），未就绪时返回 NULL */
+/* 获取当前正在显示的热成像帧（280x210 RGB565），未就绪时返回 NULL */
 const uint8_t *ir_camera_get_frame(void)
 {
     return s_thermal_img_dsc.data;
@@ -1079,7 +1079,7 @@ static void bilinear_scale_fullscreen_1to1(const uint8_t *src, int src_w, int sr
     }
 }
 
-/* 把归一化矩阵渲染为 280x240 RGB565（用指定色彩模式） */
+/* 把归一化矩阵渲染为 280x210 RGB565（用指定色彩模式） */
 void ir_camera_render_norm(const uint8_t *norm, ir_color_mode_t mode, uint16_t *dst)
 {
     if (!norm || !dst) return;
@@ -1299,16 +1299,14 @@ void ir_camera_task_main(void *pvParameters)
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 
-    char text_info[128];
-    char text_fps[32];
+    char text_max_info[32];
+    char text_min_info[32];
+    char text_fix_info[32];
     char text_max_tag[32];
     char text_min_tag[32];
     char text_fix_tag[32];
 
-    uint32_t frame_count = 0;
-    float real_fps = 0.0f;
-    int64_t last_time_us = esp_timer_get_time();
-    int64_t last_temp_diag_us = last_time_us;
+    int64_t last_temp_diag_us = esp_timer_get_time();
     int64_t last_chart_us = 0;
 
     float smooth_min_t = THERMAL_FIXED_MIN_C;
@@ -1385,8 +1383,6 @@ void ir_camera_task_main(void *pvParameters)
             MLX90640_BadPixelsCorrection(mlx_params->outlierPixels, raw_temp_matrix, mode, mlx_params);
 
             subpage_init[subpage] = true;
-            frame_count++;
-
             if (resync_left > 0) {
                 /* 丢弃遮挡前残留的半帧，两个子场都刷新成新数据后再显示 */
                 if (--resync_left == 0) {
@@ -1520,12 +1516,6 @@ void ir_camera_task_main(void *pvParameters)
 
             // 6. 帧率统计与 HUD 字符串格式化
             int64_t now_us = esp_timer_get_time();
-            int64_t diff_us = now_us - last_time_us;
-            if (diff_us >= 1000000) {
-                real_fps = (float)frame_count * 1000000.0f / (float)diff_us;
-                frame_count = 0;
-                last_time_us = now_us;
-            }
 
             int center_idx = screen_xy_to_raw_idx(MLX_INTERP_W / 2,
                                                   MLX_INTERP_H / 2);
@@ -1554,8 +1544,6 @@ void ir_camera_task_main(void *pvParameters)
             float disp_max = ir_camera_convert_temp(cur_max, &unit);
             float disp_min = ir_camera_convert_temp(cur_min, NULL);
             float disp_record = ir_camera_convert_temp(record_t, NULL);
-            float disp_dt = disp_max - disp_min;
-
             if (temperature_diag_due) {
                 ESP_LOGI(TAG,
                          "Temperature stages min: raw=%.1f temporal=%.1f median=%.1f final=%.1fC; max: raw=%.1f temporal=%.1f median=%.1f final=%.1fC; Ta=%.1f Tr=%.1fC",
@@ -1567,13 +1555,13 @@ void ir_camera_task_main(void *pvParameters)
                 last_temp_diag_us = now_us;
             }
 
-            snprintf(text_fps, sizeof(text_fps), "%.1f FPS", real_fps);
-            snprintf(text_info, sizeof(text_info),
-                     "%s %.1f %s   %s %.1f %s\n%s %.1f %s   %s %.1f %s",
-                     lang_str(STR_MAX), disp_max, unit,
-                     lang_str(STR_MIN), disp_min, unit,
-                     g_ir_settings.label_fixture ? lang_str(STR_FIX) : lang_str(STR_CENTER),
-                     disp_record, unit, lang_str(STR_DT), disp_dt, unit);
+            snprintf(text_max_info, sizeof(text_max_info), "MAX %.1f°%s",
+                     disp_max, unit);
+            snprintf(text_min_info, sizeof(text_min_info), "MIN %.1f°%s",
+                     disp_min, unit);
+            snprintf(text_fix_info, sizeof(text_fix_info), "%s %.1f°%s",
+                     g_ir_settings.label_fixture ? "FIX" : "CEN",
+                     disp_record, unit);
             snprintf(text_max_tag, sizeof(text_max_tag), "%s %.1f %s",
                      lang_str(STR_MAX), disp_max, unit);
             snprintf(text_min_tag, sizeof(text_min_tag), "%s %.1f %s",
@@ -1628,16 +1616,11 @@ void ir_camera_task_main(void *pvParameters)
                         lv_img_set_src(img_thermal, &s_thermal_img_dsc);
                         lv_obj_invalidate(img_thermal);
                     }
-                    if (label_fps_float) lv_label_set_text(label_fps_float, text_fps);
-                    if (label_info) lv_label_set_text(label_info, text_info);
-                    if (tag_emissivity) {
-                        char ebuf[24];
-                        snprintf(ebuf, sizeof(ebuf), "e:%.2f",
-                                 (double)g_ir_settings.emissivity);
-                        lv_label_set_text(tag_emissivity, ebuf);
-                    }
+                    if (label_max_info) lv_label_set_text(label_max_info, text_max_info);
+                    if (label_min_info) lv_label_set_text(label_min_info, text_min_info);
+                    if (label_fix_info) lv_label_set_text(label_fix_info, text_fix_info);
 
-                    /* 温度气泡夹在屏幕内，防止超出 280x240 */
+                    /* 温度气泡限制在热像区域内，避免进入底部温度栏 */
                     if (tag_max) {
                         if (g_ir_settings.label_hottest) {
                             lv_obj_clear_flag(tag_max, LV_OBJ_FLAG_HIDDEN);

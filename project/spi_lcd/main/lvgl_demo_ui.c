@@ -49,12 +49,12 @@ static inline lv_coord_t ui_clamp(lv_coord_t v, lv_coord_t lo, lv_coord_t hi)
 }
 
 lv_obj_t *img_thermal = NULL;
-lv_obj_t *label_fps_float = NULL;
-lv_obj_t *label_info = NULL;
+lv_obj_t *label_max_info = NULL;
+lv_obj_t *label_min_info = NULL;
+lv_obj_t *label_fix_info = NULL;
 lv_obj_t *tag_max = NULL;
 lv_obj_t *tag_min = NULL;
 lv_obj_t *tag_fix = NULL;
-lv_obj_t *tag_emissivity = NULL;
 
 static lv_obj_t *s_battery_panel = NULL;
 static lv_obj_t *s_battery_outline = NULL;
@@ -947,9 +947,9 @@ static void screen_touch_event_cb(lv_event_t *e)
         lv_point_t p;
         lv_indev_get_point(indev, &p);
 
-        if (g_ir_settings.label_fixture) {
+        if (g_ir_settings.label_fixture && p.y < MLX_INTERP_H) {
             g_ir_settings.fixture_px_x = (int)ui_clamp(p.x, 0, UI_SCREEN_W - 1);
-            g_ir_settings.fixture_px_y = (int)ui_clamp(p.y, 0, UI_SCREEN_H - 1);
+            g_ir_settings.fixture_px_y = (int)ui_clamp(p.y, 0, MLX_INTERP_H - 1);
             if (s_fixture_save_timer) {
                 lv_timer_del(s_fixture_save_timer);
             }
@@ -1106,72 +1106,54 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
     lv_obj_set_scrollbar_mode(ui_root, LV_SCROLLBAR_MODE_OFF);
     s_ui_root = ui_root;
 
-    // 1. 全屏热成像底图（280x240 横屏）
+    // 1. 按 MLX90640 原生宽高比显示 280x210 热像
     img_thermal = lv_img_create(ui_root);
     lv_img_set_src(img_thermal, &s_thermal_img_dsc);
     lv_img_set_zoom(img_thermal, 256);
     lv_img_set_antialias(img_thermal, false);
     lv_obj_set_pos(img_thermal, 0, 0);
-    lv_obj_set_size(img_thermal, UI_SCREEN_W, UI_SCREEN_H);
+    lv_obj_set_size(img_thermal, UI_SCREEN_W, MLX_INTERP_H);
     lv_obj_clear_flag(img_thermal, LV_OBJ_FLAG_CLICKABLE);
 
     s_battery_panel = lv_obj_create(ui_root);
     lv_obj_remove_style_all(s_battery_panel);
-    lv_obj_set_size(s_battery_panel, 42, 24);
-    lv_obj_set_pos(s_battery_panel, 232, 4);
-    lv_obj_set_style_bg_color(s_battery_panel, lv_color_hex(0x09061F), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(s_battery_panel, LV_OPA_30, LV_PART_MAIN);
+    lv_obj_set_size(s_battery_panel, 34, 20);
+    lv_obj_set_pos(s_battery_panel, 228, 8);
+    lv_obj_set_style_bg_color(s_battery_panel, lv_color_black(), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_battery_panel, LV_OPA_50, LV_PART_MAIN);
     lv_obj_set_style_border_width(s_battery_panel, 0, LV_PART_MAIN);
-    lv_obj_set_style_radius(s_battery_panel, 7, LV_PART_MAIN);
+    lv_obj_set_style_radius(s_battery_panel, 6, LV_PART_MAIN);
     lv_obj_clear_flag(s_battery_panel, LV_OBJ_FLAG_CLICKABLE);
 
     s_battery_outline = lv_obj_create(s_battery_panel);
     lv_obj_remove_style_all(s_battery_outline);
-    lv_obj_set_size(s_battery_outline, 23, 14);
-    lv_obj_set_pos(s_battery_outline, 5, 5);
+    lv_obj_set_size(s_battery_outline, 22, 12);
+    lv_obj_set_pos(s_battery_outline, 4, 4);
     lv_obj_set_style_bg_opa(s_battery_outline, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_border_width(s_battery_outline, 2, LV_PART_MAIN);
     lv_obj_set_style_border_color(s_battery_outline, lv_color_hex(0xF4F4FA), LV_PART_MAIN);
-    lv_obj_set_style_border_opa(s_battery_outline, LV_OPA_70, LV_PART_MAIN);
+    lv_obj_set_style_border_opa(s_battery_outline, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(s_battery_outline, 1, LV_PART_MAIN);
     lv_obj_clear_flag(s_battery_outline, LV_OBJ_FLAG_CLICKABLE);
 
     s_battery_fill = lv_obj_create(s_battery_outline);
     lv_obj_remove_style_all(s_battery_fill);
-    lv_obj_set_pos(s_battery_fill, 2, 2);
+    lv_obj_set_pos(s_battery_fill, 2, 1);
     lv_obj_set_size(s_battery_fill, 0, 6);
-    lv_obj_set_style_bg_color(s_battery_fill, lv_color_hex(0xE6E7EF), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(s_battery_fill, LV_OPA_70, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_battery_fill, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_battery_fill, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(s_battery_fill, 1, LV_PART_MAIN);
     lv_obj_clear_flag(s_battery_fill, LV_OBJ_FLAG_CLICKABLE);
 
     s_battery_cap = lv_obj_create(s_battery_panel);
     lv_obj_remove_style_all(s_battery_cap);
     lv_obj_set_size(s_battery_cap, 3, 6);
-    lv_obj_set_pos(s_battery_cap, 29, 9);
-    lv_obj_set_style_bg_color(s_battery_cap, lv_color_hex(0xF4F4FA), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(s_battery_cap, LV_OPA_70, LV_PART_MAIN);
+    lv_obj_set_pos(s_battery_cap, 27, 7);
+    lv_obj_set_style_bg_color(s_battery_cap, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_battery_cap, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_clear_flag(s_battery_cap, LV_OBJ_FLAG_CLICKABLE);
 
-    // 2. 左上角帧率小药丸
-    label_fps_float = lv_label_create(ui_root);
-    ui_style_pill(label_fps_float, T_ITEM_BORDER, T_PRIMARY, LV_OPA_60);
-    lv_obj_set_style_text_font(label_fps_float, lang_font(), LV_PART_MAIN);
-    lv_obj_set_style_pad_hor(label_fps_float, 8, LV_PART_MAIN);
-    lv_obj_set_style_pad_ver(label_fps_float, 2, LV_PART_MAIN);
-    lv_obj_set_pos(label_fps_float, 6, 34);
-    lv_label_set_text(label_fps_float, "-- FPS");
-
-    // 3. 左侧发射率小药丸
-    tag_emissivity = lv_label_create(ui_root);
-    ui_style_pill(tag_emissivity, T_BORDER_LIGHT, T_TEXT_MID, LV_OPA_60);
-    lv_obj_set_style_text_font(tag_emissivity, lang_font(), LV_PART_MAIN);
-    lv_obj_set_style_pad_hor(tag_emissivity, 8, LV_PART_MAIN);
-    lv_obj_set_style_pad_ver(tag_emissivity, 2, LV_PART_MAIN);
-    lv_obj_set_pos(tag_emissivity, 6, 66);
-    lv_label_set_text(tag_emissivity, "");
-
-    // 5. 动态最高温与最低温指示气泡（白底，MAX 红 / MIN 蓝）
+    // 2. 热像区域内的最高温与最低温指示气泡
     tag_max = lv_label_create(ui_root);
     ui_style_pill(tag_max, T_DANGER, T_DANGER, LV_OPA_80);
     lv_obj_set_style_text_font(tag_max, lang_font(), LV_PART_MAIN);
@@ -1194,25 +1176,47 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
     lv_label_set_text(tag_fix, "");
     lv_obj_add_flag(tag_fix, LV_OBJ_FLAG_HIDDEN);
 
-    // 6. 底部仪表盘卡片（白底蓝字）
+    // 5. 底部三段温度栏
     lv_obj_t *bottom_capsule = lv_obj_create(ui_root);
     lv_obj_remove_style_all(bottom_capsule);
-    lv_obj_set_size(bottom_capsule, 264, 44);
-    lv_obj_align(bottom_capsule, LV_ALIGN_BOTTOM_MID, 0, -6);
-    lv_obj_set_style_bg_color(bottom_capsule, lv_color_white(), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(bottom_capsule, LV_OPA_70, LV_PART_MAIN);
-    lv_obj_set_style_border_width(bottom_capsule, 1, LV_PART_MAIN);
-    lv_obj_set_style_border_color(bottom_capsule, lv_color_hex(T_ITEM_BORDER), LV_PART_MAIN);
-    lv_obj_set_style_border_opa(bottom_capsule, LV_OPA_60, LV_PART_MAIN);
-    lv_obj_set_style_radius(bottom_capsule, 14, LV_PART_MAIN);
+    lv_obj_set_size(bottom_capsule, UI_SCREEN_W, UI_SCREEN_H - MLX_INTERP_H);
+    lv_obj_set_pos(bottom_capsule, 0, MLX_INTERP_H);
+    lv_obj_set_style_bg_color(bottom_capsule, lv_color_hex(0x08051D), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(bottom_capsule, LV_OPA_30, LV_PART_MAIN);
+    lv_obj_set_style_border_width(bottom_capsule, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(bottom_capsule, 0, LV_PART_MAIN);
     lv_obj_clear_flag(bottom_capsule, LV_OBJ_FLAG_CLICKABLE);
 
-    label_info = lv_label_create(bottom_capsule);
-    lv_obj_set_style_text_color(label_info, lv_color_hex(T_TEXT_DARK), LV_PART_MAIN);
-    lv_obj_set_style_text_font(label_info, lang_font(), LV_PART_MAIN);
-    lv_obj_set_style_text_align(label_info, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(label_info, LV_ALIGN_CENTER, 0, 0);
-    lv_label_set_text(label_info, lang_str(STR_CALIBRATING));
+    lv_obj_t *bar_top_line = lv_obj_create(bottom_capsule);
+    lv_obj_remove_style_all(bar_top_line);
+    lv_obj_set_size(bar_top_line, UI_SCREEN_W, 1);
+    lv_obj_set_pos(bar_top_line, 0, 0);
+    lv_obj_set_style_bg_color(bar_top_line, lv_color_hex(0x8D82B6), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(bar_top_line, LV_OPA_50, LV_PART_MAIN);
+    lv_obj_clear_flag(bar_top_line, LV_OBJ_FLAG_CLICKABLE);
+
+    const uint32_t metric_colors[] = {0xFF5964, 0x55C9F5, 0xF2F1F8};
+    lv_obj_t **metric_labels[] = {&label_max_info, &label_min_info, &label_fix_info};
+    for (int i = 0; i < 3; i++) {
+        *metric_labels[i] = lv_label_create(bottom_capsule);
+        lv_obj_set_size(*metric_labels[i], 92, 24);
+        lv_obj_set_pos(*metric_labels[i], i * 94, 3);
+        lv_obj_set_style_text_color(*metric_labels[i], lv_color_hex(metric_colors[i]), LV_PART_MAIN);
+        lv_obj_set_style_text_font(*metric_labels[i], &lv_font_montserrat_14, LV_PART_MAIN);
+        lv_obj_set_style_text_align(*metric_labels[i], LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+        lv_label_set_long_mode(*metric_labels[i], LV_LABEL_LONG_CLIP);
+        lv_label_set_text(*metric_labels[i], "--");
+    }
+
+    for (int i = 0; i < 2; i++) {
+        lv_obj_t *separator = lv_obj_create(bottom_capsule);
+        lv_obj_remove_style_all(separator);
+        lv_obj_set_size(separator, 1, 18);
+        lv_obj_set_pos(separator, 93 + i * 94, 6);
+        lv_obj_set_style_bg_color(separator, lv_color_hex(0x8D82B6), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(separator, LV_OPA_50, LV_PART_MAIN);
+        lv_obj_clear_flag(separator, LV_OBJ_FLAG_CLICKABLE);
+    }
 
     s_battery_warning = lv_label_create(ui_root);
     lv_obj_set_size(s_battery_warning, 268, 34);
@@ -1263,7 +1267,7 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
     s_viewer_img = lv_img_create(s_viewer_overlay);
     lv_img_set_zoom(s_viewer_img, 256);
     lv_obj_set_pos(s_viewer_img, 0, 0);
-    lv_obj_set_size(s_viewer_img, UI_SCREEN_W, UI_SCREEN_H);
+    lv_obj_set_size(s_viewer_img, UI_SCREEN_W, MLX_INTERP_H);
     lv_obj_clear_flag(s_viewer_img, LV_OBJ_FLAG_CLICKABLE);
 
     s_viewer_title = lv_label_create(s_viewer_overlay);
@@ -1352,8 +1356,8 @@ void thermal_ui_refresh_language(void)
 {
     /* HUD 上所有文字都在切语言后需要换字体，否则新语言的字形缺失会显示成空白/方块 */
     lv_obj_t *labels[] = {
-        label_fps_float, label_info,
-        tag_max, tag_min, tag_fix, tag_emissivity,
+        label_max_info, label_min_info, label_fix_info,
+        tag_max, tag_min, tag_fix,
         s_viewer_title, s_battery_warning,
     };
     for (size_t i = 0; i < sizeof(labels) / sizeof(labels[0]); i++) {
