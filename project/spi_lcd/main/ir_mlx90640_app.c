@@ -142,6 +142,16 @@ ir_app_settings_t g_ir_settings = {
 #define IR_TAG_GUESS_W  108
 #define IR_TAG_GUESS_H  26
 
+/*
+ * 归一化色阶低噪软拐点参数：
+ * - 门限温宽覆盖自动量程冷端留白及一部分背景底噪
+ * - 原点偏置幂曲线保证门限上方斜率有限
+ */
+#define NORM_NOISE_GATE_C               1.20f
+#define NORM_NOISE_GATE_MIN             0.03f
+#define NORM_NOISE_GATE_MAX             0.16f
+#define NORM_GAMMA_TOE_EPS              0.08f
+
 
 static void place_temp_tag(lv_obj_t *tag, int px, int py, const char *text)
 {
@@ -1285,15 +1295,34 @@ static void temperature_to_norm(const float *src, uint8_t *dst8, uint16_t *dst16
     }
 
     const float range_inv = 1.0f / delta;
-    const float noise_gate = clampf_local(0.55f * range_inv, 0.02f, 0.15f);
+    const float noise_gate = clampf_local(NORM_NOISE_GATE_C * range_inv,
+                                          NORM_NOISE_GATE_MIN,
+                                          NORM_NOISE_GATE_MAX);
+    const float inv_gate = 1.0f / noise_gate;
     const float inv_above_gate = 1.0f / (1.0f - noise_gate);
     const float low_delta_blend =
         clampf_local((15.0f - delta) / 9.0f, 0.0f, 1.0f);
     float user_gamma = clampf_local(g_ir_settings.gamma, 0.5f, 3.0f);
-    const float auto_gamma = 1.12f - 0.40f * low_delta_blend;
+    const float auto_gamma = 1.12f - 0.36f * low_delta_blend;
     const float effective_gamma =
         clampf_local(auto_gamma * (user_gamma / 1.5f), 0.55f, 2.2f);
     const bool use_linear = fabsf(effective_gamma - 1.0f) < 0.03f;
+
+    const float eps = NORM_GAMMA_TOE_EPS;
+    float eps_pow = 0.0f;
+    float inv_pow_span = 1.0f;
+    float f_prime_0 = 1.0f;
+    if (!use_linear) {
+        eps_pow = powf(eps, effective_gamma);
+        float max_pow = powf(1.0f + eps, effective_gamma);
+        inv_pow_span = 1.0f / (max_pow - eps_pow);
+        f_prime_0 = effective_gamma *
+                    powf(eps, effective_gamma - 1.0f) * inv_pow_span;
+    }
+
+    const float k = noise_gate * inv_above_gate * f_prime_0;
+    const float y_gate = k / (3.0f + k);
+    const float y_above_span = 1.0f - y_gate;
 
     for (int i = 0; i < MLX_RAW_PIXELS; i++) {
         if (!ir_temperature_is_valid(src[i])) {
@@ -1305,13 +1334,18 @@ static void temperature_to_norm(const float *src, uint8_t *dst8, uint16_t *dst16
         norm = clampf_local(norm, 0.0f, 1.0f);
 
         if (norm <= noise_gate) {
-            norm = (norm / noise_gate) * 0.03f;
+            float r = norm * inv_gate;
+            norm = y_gate * (r * r * r);
         } else {
             float t = (norm - noise_gate) * inv_above_gate;
-            float mapped = use_linear ? t : powf(t, effective_gamma);
-            norm = 0.03f + 0.97f * mapped;
+            float mapped = use_linear
+                         ? t
+                         : (powf(t + eps, effective_gamma) - eps_pow) *
+                           inv_pow_span;
+            norm = y_gate + y_above_span * mapped;
         }
 
+        norm = clampf_local(norm, 0.0f, 1.0f);
         dst8[i] = (uint8_t)(norm * 255.0f + 0.5f);
         dst16[i] = (uint16_t)(norm * 65535.0f + 0.5f);
     }
