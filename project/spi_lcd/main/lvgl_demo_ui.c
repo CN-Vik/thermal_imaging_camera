@@ -14,39 +14,36 @@
 /* ================= 横屏逻辑分辨率（与 app_main.c 中 UI_SCREEN_W/H 一致） ================= */
 #define UI_SCREEN_W        280
 #define UI_SCREEN_H        240
-/* 相册页顶部蓝色标题栏高度（与设置页 header 一致） */
+/* 相册页顶部标题栏高度（与设置页 header 一致） */
 #define GALLERY_HEADER_H    40
 #define TOUCH_CURSOR_SIZE  30
 #define TOUCH_LABEL_W      96
 #define TOUCH_LABEL_H      16
 
-#define GALLERY_BG              0x090B0E
-#define GALLERY_HEADER          0x20262E
-#define GALLERY_CARD            0x171B21
-#define GALLERY_BORDER          0x2B3139
-#define GALLERY_TEXT            0xF1F3F5
-#define GALLERY_MUTED           0x929BA5
-#define GALLERY_ACCENT          0xF28A2E
-#define GALLERY_DANGER          0xD93434
+#define GALLERY_BG              0x121212
+#define GALLERY_HEADER          0x181818
+#define GALLERY_CARD            0x242424
+#define GALLERY_BORDER          0x303030
+#define GALLERY_TEXT            0xFFFFFF
+#define GALLERY_MUTED           0xB0B0B0
+#define GALLERY_ACCENT          0xFFFFFF
+#define GALLERY_DANGER          0xE53935
+#define GALLERY_PRESSED         0x383838
 
-/* =============================================================================
- * 蓝白主题配色（客户要求：菜单 UI 改为蓝白风格）
- *  面板/底色 = 白色系；强调/按钮 = 主题蓝；文字 = 深蓝；
- *  危险操作（关机/删除）保留红色警示。
- * ============================================================================= */
-#define T_PANEL_BG        0xFFFFFF   // 面板白
-#define T_PAGE_BG         0xF4F8FE   // 浅蓝白底
-#define T_PRIMARY         0x1976D2   // 主题蓝
-#define T_PRIMARY_DEEP    0x0D47A1   // 深蓝（按下态）
-#define T_PRIMARY_LIGHT   0xE3F2FD   // 浅蓝（按下态底色）
-#define T_TEXT_DARK       0x123A66   // 深蓝正文
-#define T_TEXT_MID        0x3A5B85   // 次级文字蓝
-#define T_ITEM_BG         0xEAF3FF   // 列表条目浅蓝底
-#define T_ITEM_BORDER     0xBDD7F8   // 条目边框浅蓝
-#define T_BORDER_LIGHT    0xD6E4F7   // 面板浅边框
-#define T_DANGER          0xE53935   // 危险红
-#define T_DANGER_BG       0xFFEBEE   // 危险浅红底
-#define T_DANGER_BORDER   0xFFCDD2   // 危险浅红边
+/* Monochrome palette for UI controls and labels; thermal color modes stay intact. */
+#define T_PANEL_BG        0x121212
+#define T_PAGE_BG         0x121212
+#define T_PRIMARY         0x383838
+#define T_PRIMARY_DEEP    0x505050
+#define T_PRIMARY_LIGHT   0x383838
+#define T_TEXT_DARK       0xFFFFFF
+#define T_TEXT_MID        0xB0B0B0
+#define T_ITEM_BG         0x242424
+#define T_ITEM_BORDER     0x303030
+#define T_BORDER_LIGHT    0x383838
+#define T_DANGER          0xFFFFFF
+#define T_DANGER_BG       0x242424
+#define T_DANGER_BORDER   0x303030
 
 static const char *UI_TAG = "thermal_ui";
 
@@ -163,26 +160,25 @@ static const uint32_t s_mode_dot_hex[IR_COLOR_MODE_MAX] = {
     0xFF4100, // Thermal Iron
 };
 
-/* ================= 蓝白主题通用样式辅助 ================= */
+/* ================= 黑白灰主题通用样式辅助 ================= */
 
-/* 白色面板 + 浅蓝边框（弹窗/菜单容器） */
+/* 黑色面板 + 白色边框（弹窗/菜单容器） */
 static void ui_style_white_panel(lv_obj_t *obj, lv_opa_t bg_opa)
 {
     lv_obj_set_style_bg_color(obj, lv_color_hex(T_PANEL_BG), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(obj, bg_opa, LV_PART_MAIN);
-    lv_obj_set_style_border_width(obj, 2, LV_PART_MAIN);
+    lv_obj_set_style_border_width(obj, 0, LV_PART_MAIN);
     lv_obj_set_style_border_color(obj, lv_color_hex(T_ITEM_BORDER), LV_PART_MAIN);
     lv_obj_set_style_border_opa(obj, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_radius(obj, 16, LV_PART_MAIN);
+    lv_obj_set_style_radius(obj, 12, LV_PART_MAIN);
 }
 
-/* 列表条目：白底 + 底部浅蓝分隔线 + 深蓝文字；按下变实心蓝（与设置菜单一致） */
+/* 列表条目：黑底白色分隔线；按下变灰（与设置菜单一致） */
 static void ui_style_list_item(lv_obj_t *btn)
 {
-    lv_obj_set_style_bg_color(btn, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(T_ITEM_BG), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_border_width(btn, 1, LV_PART_MAIN);
-    lv_obj_set_style_border_side(btn, LV_BORDER_SIDE_BOTTOM, LV_PART_MAIN);
+    lv_obj_set_style_border_width(btn, 0, LV_PART_MAIN);
     lv_obj_set_style_border_color(btn, lv_color_hex(T_BORDER_LIGHT), LV_PART_MAIN);
     lv_obj_set_style_border_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
 
@@ -191,22 +187,21 @@ static void ui_style_list_item(lv_obj_t *btn)
     lv_obj_set_style_text_color(btn, lv_color_white(), LV_STATE_PRESSED);
 }
 
-/* 危险条目（关机/删除）：白底红字，按下实心红 */
+/* 危险条目（关机/删除）：黑底白字，按下变灰 */
 static void ui_style_danger_item(lv_obj_t *btn)
 {
-    lv_obj_set_style_bg_color(btn, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(T_ITEM_BG), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_border_width(btn, 1, LV_PART_MAIN);
-    lv_obj_set_style_border_side(btn, LV_BORDER_SIDE_BOTTOM, LV_PART_MAIN);
+    lv_obj_set_style_border_width(btn, 0, LV_PART_MAIN);
     lv_obj_set_style_border_color(btn, lv_color_hex(T_BORDER_LIGHT), LV_PART_MAIN);
     lv_obj_set_style_border_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
 
-    lv_obj_set_style_bg_color(btn, lv_color_hex(T_DANGER), LV_STATE_PRESSED);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(T_PRIMARY), LV_STATE_PRESSED);
     lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_STATE_PRESSED);
     lv_obj_set_style_text_color(btn, lv_color_white(), LV_STATE_PRESSED);
 }
 
-/* 主按钮：实心蓝 + 白字 */
+/* 主按钮：深灰填充 + 白字 */
 static void ui_style_primary_btn(lv_obj_t *btn)
 {
     lv_obj_set_style_bg_color(btn, lv_color_hex(T_PRIMARY), LV_PART_MAIN);
@@ -217,15 +212,14 @@ static void ui_style_primary_btn(lv_obj_t *btn)
     lv_obj_set_style_radius(btn, 10, LV_PART_MAIN);
 }
 
-/* 次级按钮（返回）：白底 + 蓝边 + 蓝字 */
+/* 次级按钮（返回）：黑底 + 白框 + 白字 */
 static void ui_style_ghost_btn(lv_obj_t *btn)
 {
-    lv_obj_set_style_bg_color(btn, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(T_ITEM_BG), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_bg_color(btn, lv_color_hex(T_PRIMARY_LIGHT), LV_STATE_PRESSED);
     lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_STATE_PRESSED);
-    lv_obj_set_style_border_width(btn, 1, LV_PART_MAIN);
-    lv_obj_set_style_border_color(btn, lv_color_hex(T_PRIMARY), LV_PART_MAIN);
+    lv_obj_set_style_border_width(btn, 0, LV_PART_MAIN);
     lv_obj_set_style_border_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(btn, 10, LV_PART_MAIN);
 }
@@ -238,15 +232,15 @@ static void update_menu_active_style(ir_color_mode_t active_mode)
         if (i == (int)active_mode) {
             lv_obj_set_style_bg_color(s_mode_btns[i], lv_color_hex(T_PRIMARY), LV_PART_MAIN);
             lv_obj_set_style_bg_opa(s_mode_btns[i], LV_OPA_COVER, LV_PART_MAIN);
-            lv_obj_set_style_border_color(s_mode_btns[i], lv_color_hex(T_PRIMARY_DEEP), LV_PART_MAIN);
-            lv_obj_set_style_border_width(s_mode_btns[i], 2, LV_PART_MAIN);
+            lv_obj_set_style_border_color(s_mode_btns[i], lv_color_hex(T_ITEM_BORDER), LV_PART_MAIN);
+            lv_obj_set_style_border_width(s_mode_btns[i], 0, LV_PART_MAIN);
             if (s_mode_lbls[i]) lv_obj_set_style_text_color(s_mode_lbls[i], lv_color_white(), LV_PART_MAIN);
             if (s_mode_chks[i]) lv_label_set_text(s_mode_chks[i], "ON");
         } else {
-            lv_obj_set_style_bg_color(s_mode_btns[i], lv_color_white(), LV_PART_MAIN);
+            lv_obj_set_style_bg_color(s_mode_btns[i], lv_color_hex(T_ITEM_BG), LV_PART_MAIN);
             lv_obj_set_style_bg_opa(s_mode_btns[i], LV_OPA_COVER, LV_PART_MAIN);
             lv_obj_set_style_border_color(s_mode_btns[i], lv_color_hex(T_BORDER_LIGHT), LV_PART_MAIN);
-            lv_obj_set_style_border_width(s_mode_btns[i], 1, LV_PART_MAIN);
+            lv_obj_set_style_border_width(s_mode_btns[i], 0, LV_PART_MAIN);
             if (s_mode_lbls[i]) lv_obj_set_style_text_color(s_mode_lbls[i], lv_color_hex(T_TEXT_DARK), LV_PART_MAIN);
             if (s_mode_chks[i]) lv_label_set_text(s_mode_chks[i], "");
         }
@@ -360,7 +354,7 @@ static void main_menu_color_cb(lv_event_t *e)
 
 /* ================= 通用 UI 构建辅助 ================= */
 
-/* 创建居中主面板（蓝白主题：白底 + 浅蓝边框） */
+/* 创建居中主面板（白底 + 灰色边框） */
 static lv_obj_t *create_panel(lv_obj_t *parent, lv_coord_t w, lv_coord_t h)
 {
     lv_obj_t *panel = lv_obj_create(parent);
@@ -384,14 +378,14 @@ static lv_obj_t *create_title(lv_obj_t *panel, const char *text)
     return t;
 }
 
-/* 创建面板内滚动列表容器（浅蓝白底） */
+/* 创建面板内滚动列表容器（白底） */
 static lv_obj_t *create_list_container(lv_obj_t *panel, lv_coord_t w, lv_coord_t h)
 {
     lv_obj_t *cont = lv_obj_create(panel);
     lv_obj_remove_style_all(cont);
     lv_obj_set_size(cont, w, h);
     lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, 30);
-    lv_obj_set_style_bg_color(cont, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(cont, lv_color_hex(T_PAGE_BG), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(cont, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(cont, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(cont, 0, LV_PART_MAIN);
@@ -402,7 +396,7 @@ static lv_obj_t *create_list_container(lv_obj_t *panel, lv_coord_t w, lv_coord_t
     return cont;
 }
 
-/* 创建列表条目按钮（按下抬起 CLICKED 触发），red=危险红、arrow=右侧 ">" */
+/* 创建列表条目按钮（按下抬起 CLICKED 触发），red=危险项、arrow=右侧 ">" */
 static lv_obj_t *create_list_entry(lv_obj_t *parent, const char *text, bool red, bool arrow,
                                    lv_event_cb_t cb, void *user_data, lv_obj_t **label_out,
                                    lv_coord_t w, lv_coord_t h)
@@ -431,7 +425,7 @@ static lv_obj_t *create_list_entry(lv_obj_t *parent, const char *text, bool red,
 
     if (arrow) {
         lv_obj_t *ind = lv_label_create(btn);
-        lv_obj_set_style_text_color(ind, lv_color_hex(T_PRIMARY), LV_PART_MAIN);
+        lv_obj_set_style_text_color(ind, lv_color_hex(T_TEXT_DARK), LV_PART_MAIN);
         lv_obj_set_style_text_font(ind, &lv_font_montserrat_18, LV_PART_MAIN);
         lv_label_set_text(ind, ">");
         lv_obj_align(ind, LV_ALIGN_RIGHT_MID, -16, 0);
@@ -622,9 +616,7 @@ static void create_gallery_entry(const char *text, bool danger, lv_event_cb_t cb
     lv_obj_set_style_bg_opa(row, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_bg_color(row, lv_color_hex(GALLERY_BORDER), LV_STATE_PRESSED);
     lv_obj_set_style_bg_opa(row, LV_OPA_COVER, LV_STATE_PRESSED);
-    lv_obj_set_style_border_width(row, 1, LV_PART_MAIN);
-    lv_obj_set_style_border_side(row, LV_BORDER_SIDE_BOTTOM, LV_PART_MAIN);
-    lv_obj_set_style_border_color(row, lv_color_hex(GALLERY_BORDER), LV_PART_MAIN);
+    lv_obj_set_style_border_width(row, 0, LV_PART_MAIN);
     lv_obj_set_style_radius(row, 0, LV_PART_MAIN);
     lv_obj_add_event_cb(row, cb, LV_EVENT_CLICKED, user_data);
 
@@ -727,7 +719,7 @@ static void power_button_cb(lv_event_t *e)
     power_off_event_cb(e);
 }
 
-/* 底部“返回”按钮（用于语言/相册二级面板），蓝白次级样式 */
+/* 底部“返回”按钮（用于语言/相册二级面板），黑底白框样式 */
 static lv_obj_t *create_back_button(lv_obj_t *panel, lv_event_cb_t cb)
 {
     lv_obj_t *btn = lv_obj_create(panel);
@@ -739,27 +731,27 @@ static lv_obj_t *create_back_button(lv_obj_t *panel, lv_event_cb_t cb)
     lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *lbl = lv_label_create(btn);
-    lv_obj_set_style_text_color(lbl, lv_color_hex(T_PRIMARY), LV_PART_MAIN);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(T_TEXT_DARK), LV_PART_MAIN);
     lv_obj_set_style_text_font(lbl, lang_font(), LV_PART_MAIN);
     lv_label_set_text(lbl, lang_str(STR_BACK));
     lv_obj_center(lbl);
     return btn;
 }
 
-/* 创建“多级菜单”（蓝白主题横屏版）：
+/* 创建“多级菜单”（黑白灰主题横屏版）：
    一级菜单 = 模式配置（色彩模式 / 语言 / 相册 / 关机）
    二级菜单 = 色彩模式调色板 / 语言选择 / 相册 */
 static void create_settings_menu(lv_obj_t *parent)
 {
-    // 1. 全屏半透明遮罩 (点击外部自动取消)：浅蓝白雾面
+    // 1. 全屏白色背景 (点击外部自动取消)
     s_menu_backdrop = lv_obj_create(parent);
     lv_obj_remove_style_all(s_menu_backdrop);
     lv_obj_set_size(s_menu_backdrop, UI_SCREEN_W, UI_SCREEN_H);
     lv_obj_set_pos(s_menu_backdrop, 0, 0);
     lv_obj_clear_flag(s_menu_backdrop, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scrollbar_mode(s_menu_backdrop, LV_SCROLLBAR_MODE_OFF);
-    lv_obj_set_style_bg_color(s_menu_backdrop, lv_color_hex(0xDCE8F5), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(s_menu_backdrop, LV_OPA_90, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_menu_backdrop, lv_color_hex(T_PAGE_BG), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_menu_backdrop, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_add_flag(s_menu_backdrop, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(s_menu_backdrop, menu_backdrop_cancel_cb, LV_EVENT_CLICKED, NULL);
 
@@ -779,7 +771,7 @@ static void create_settings_menu(lv_obj_t *parent)
     lv_obj_set_size(s_palette_panel, 268, 232);
     lv_obj_align(s_palette_panel, LV_ALIGN_CENTER, 0, 0);
     lv_obj_clear_flag(s_palette_panel, LV_OBJ_FLAG_SCROLLABLE);
-    ui_style_white_panel(s_palette_panel, LV_OPA_90); // 90% 透明度，方便透视预览背景热像
+    ui_style_white_panel(s_palette_panel, LV_OPA_COVER);
     lv_obj_add_flag(s_palette_panel, LV_OBJ_FLAG_CLICKABLE);
 
     // 3. 顶部当前预览模式标题
@@ -794,7 +786,7 @@ static void create_settings_menu(lv_obj_t *parent)
     lv_obj_remove_style_all(s_list_cont);
     lv_obj_set_size(s_list_cont, 244, 148);
     lv_obj_align(s_list_cont, LV_ALIGN_TOP_MID, 0, 30);
-    lv_obj_set_style_bg_color(s_list_cont, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_list_cont, lv_color_hex(T_PAGE_BG), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(s_list_cont, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(s_list_cont, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(s_list_cont, 0, LV_PART_MAIN);
@@ -808,9 +800,7 @@ static void create_settings_menu(lv_obj_t *parent)
         lv_obj_t *btn = lv_obj_create(s_list_cont);
         lv_obj_remove_style_all(btn);
         lv_obj_set_size(btn, 244, 32);
-        lv_obj_set_style_border_width(btn, 1, LV_PART_MAIN);
-        lv_obj_set_style_border_side(btn, LV_BORDER_SIDE_BOTTOM, LV_PART_MAIN);
-        lv_obj_set_style_border_color(btn, lv_color_hex(T_BORDER_LIGHT), LV_PART_MAIN);
+        lv_obj_set_style_border_width(btn, 0, LV_PART_MAIN);
         lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_event_cb(btn, mode_item_click_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)i);
 
@@ -853,7 +843,7 @@ static void create_settings_menu(lv_obj_t *parent)
     lv_obj_add_event_cb(btn_back, palette_back_event_cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *lbl_back = lv_label_create(btn_back);
-    lv_obj_set_style_text_color(lbl_back, lv_color_hex(T_PRIMARY), LV_PART_MAIN);
+    lv_obj_set_style_text_color(lbl_back, lv_color_hex(T_TEXT_DARK), LV_PART_MAIN);
     lv_obj_set_style_text_font(lbl_back, lang_font(), LV_PART_MAIN);
     lv_label_set_text(lbl_back, lang_str(STR_BACK));
     lv_obj_center(lbl_back);
@@ -899,7 +889,7 @@ static void create_settings_menu(lv_obj_t *parent)
     }
     create_back_button(s_language_panel, menu_back_to_main_cb);
 
-    /* ================= 二级：相册（深色背景 + 橙色强调） ================= */
+    /* ================= 二级：相册（黑底白框） ================= */
     s_gallery_panel = lv_obj_create(s_menu_backdrop);
     lv_obj_remove_style_all(s_gallery_panel);
     lv_obj_set_size(s_gallery_panel, UI_SCREEN_W, UI_SCREEN_H);
@@ -911,14 +901,14 @@ static void create_settings_menu(lv_obj_t *parent)
     lv_obj_set_style_radius(s_gallery_panel, 0, LV_PART_MAIN);
     lv_obj_add_flag(s_gallery_panel, LV_OBJ_FLAG_CLICKABLE);
 
-    // 深色顶栏，返回图标使用设置菜单的橙色强调色
+    // 黑色顶栏，白色返回图标
     lv_obj_t *g_header = lv_obj_create(s_gallery_panel);
     lv_obj_remove_style_all(g_header);
     lv_obj_set_size(g_header, UI_SCREEN_W, GALLERY_HEADER_H);
     lv_obj_set_pos(g_header, 0, 0);
     lv_obj_set_style_bg_color(g_header, lv_color_hex(GALLERY_HEADER), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(g_header, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(g_header, lv_color_hex(GALLERY_CARD), LV_STATE_PRESSED);
+    lv_obj_set_style_bg_color(g_header, lv_color_hex(GALLERY_PRESSED), LV_STATE_PRESSED);
     lv_obj_set_style_bg_opa(g_header, LV_OPA_COVER, LV_STATE_PRESSED);
     lv_obj_set_style_border_width(g_header, 0, LV_PART_MAIN);
     lv_obj_add_flag(g_header, LV_OBJ_FLAG_CLICKABLE);
@@ -929,14 +919,6 @@ static void create_settings_menu(lv_obj_t *parent)
     lv_obj_set_style_text_font(g_back, &lv_font_montserrat_18, LV_PART_MAIN);
     lv_label_set_text(g_back, LV_SYMBOL_LEFT);
     lv_obj_center(g_back);
-
-    lv_obj_t *g_accent = lv_obj_create(s_gallery_panel);
-    lv_obj_remove_style_all(g_accent);
-    lv_obj_set_size(g_accent, UI_SCREEN_W - 28, 2);
-    lv_obj_set_pos(g_accent, 14, GALLERY_HEADER_H - 2);
-    lv_obj_set_style_bg_color(g_accent, lv_color_hex(GALLERY_ACCENT), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(g_accent, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_clear_flag(g_accent, LV_OBJ_FLAG_CLICKABLE);
 
     // 相册照片数量固定显示在页面底部居中
     s_gallery_title = lv_label_create(s_gallery_panel);
@@ -1184,12 +1166,12 @@ static void screen_touch_event_cb(lv_event_t *e)
     }
 }
 
-/* 创建一个白底 + 蓝边的小药丸标签（主界面 HUD 通用） */
+/* 创建一个深色小药丸标签（主界面 HUD 通用） */
 static void ui_style_pill(lv_obj_t *pill, uint32_t border_hex, uint32_t text_hex, lv_opa_t bg_opa)
 {
-    lv_obj_set_style_bg_color(pill, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(pill, lv_color_black(), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(pill, bg_opa, LV_PART_MAIN);
-    lv_obj_set_style_border_width(pill, 1, LV_PART_MAIN);
+    lv_obj_set_style_border_width(pill, 0, LV_PART_MAIN);
     lv_obj_set_style_border_color(pill, lv_color_hex(border_hex), LV_PART_MAIN);
     lv_obj_set_style_border_opa(pill, LV_OPA_60, LV_PART_MAIN);
     lv_obj_set_style_text_color(pill, lv_color_hex(text_hex), LV_PART_MAIN);
@@ -1252,7 +1234,7 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
     lv_obj_set_pos(s_battery_outline, 3, 3);
     lv_obj_set_style_bg_opa(s_battery_outline, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_border_width(s_battery_outline, 2, LV_PART_MAIN);
-    lv_obj_set_style_border_color(s_battery_outline, lv_color_hex(0xF4F4FA), LV_PART_MAIN);
+    lv_obj_set_style_border_color(s_battery_outline, lv_color_hex(0xF4F4F4), LV_PART_MAIN);
     lv_obj_set_style_border_opa(s_battery_outline, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(s_battery_outline, 1, LV_PART_MAIN);
     lv_obj_clear_flag(s_battery_outline, LV_OBJ_FLAG_CLICKABLE);
@@ -1283,14 +1265,14 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
     lv_label_set_text(tag_max, "");
 
     tag_min = lv_label_create(ui_root);
-    ui_style_pill(tag_min, T_PRIMARY, T_PRIMARY, LV_OPA_80);
+    ui_style_pill(tag_min, T_ITEM_BORDER, T_TEXT_DARK, LV_OPA_80);
     lv_obj_set_style_text_font(tag_min, lang_font(), LV_PART_MAIN);
     lv_obj_set_style_pad_hor(tag_min, 7, LV_PART_MAIN);
     lv_obj_set_style_pad_ver(tag_min, 2, LV_PART_MAIN);
     lv_label_set_text(tag_min, "");
 
     tag_fix = lv_label_create(ui_root);
-    ui_style_pill(tag_fix, 0x00A958, 0x007A3F, LV_OPA_80);
+    ui_style_pill(tag_fix, T_ITEM_BORDER, T_TEXT_DARK, LV_OPA_80);
     lv_obj_set_style_text_font(tag_fix, lang_font(), LV_PART_MAIN);
     lv_obj_set_style_pad_hor(tag_fix, 7, LV_PART_MAIN);
     lv_obj_set_style_pad_ver(tag_fix, 2, LV_PART_MAIN);
@@ -1302,7 +1284,7 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
     lv_obj_remove_style_all(bottom_capsule);
     lv_obj_set_size(bottom_capsule, UI_SCREEN_W, UI_SCREEN_H - MLX_VISIBLE_H);
     lv_obj_set_pos(bottom_capsule, 0, MLX_VISIBLE_H);
-    lv_obj_set_style_bg_color(bottom_capsule, lv_color_hex(0x08051D), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(bottom_capsule, lv_color_hex(0x202020), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(bottom_capsule, LV_OPA_30, LV_PART_MAIN);
     lv_obj_set_style_border_width(bottom_capsule, 0, LV_PART_MAIN);
     lv_obj_set_style_radius(bottom_capsule, 0, LV_PART_MAIN);
@@ -1312,11 +1294,11 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
     lv_obj_remove_style_all(bar_top_line);
     lv_obj_set_size(bar_top_line, UI_SCREEN_W, 1);
     lv_obj_set_pos(bar_top_line, 0, 0);
-    lv_obj_set_style_bg_color(bar_top_line, lv_color_hex(0x8D82B6), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(bar_top_line, lv_color_hex(0x888888), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(bar_top_line, LV_OPA_50, LV_PART_MAIN);
     lv_obj_clear_flag(bar_top_line, LV_OBJ_FLAG_CLICKABLE);
 
-    const uint32_t metric_colors[] = {0xFF5964, 0x55C9F5, 0xF2F1F8};
+    const uint32_t metric_colors[] = {0xFFFFFF, 0xCCCCCC, 0x888888};
     lv_obj_t **metric_labels[] = {&label_max_info, &label_min_info, &label_fix_info};
     for (int i = 0; i < 3; i++) {
         *metric_labels[i] = lv_label_create(bottom_capsule);
@@ -1334,7 +1316,7 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
         lv_obj_remove_style_all(separator);
         lv_obj_set_size(separator, 1, 18);
         lv_obj_set_pos(separator, 93 + i * 94, 6);
-        lv_obj_set_style_bg_color(separator, lv_color_hex(0x8D82B6), LV_PART_MAIN);
+        lv_obj_set_style_bg_color(separator, lv_color_hex(0x888888), LV_PART_MAIN);
         lv_obj_set_style_bg_opa(separator, LV_OPA_50, LV_PART_MAIN);
         lv_obj_clear_flag(separator, LV_OBJ_FLAG_CLICKABLE);
     }
@@ -1353,14 +1335,14 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
     lv_obj_add_flag(s_battery_warning, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(s_battery_warning, LV_OBJ_FLAG_CLICKABLE);
 
-    // 7. 触摸准星与长按滑动列表菜单（蓝色准星）
+    // 7. 触摸准星与长按滑动列表菜单（灰色准星）
     touch_cursor = lv_obj_create(ui_root);
     lv_obj_remove_style_all(touch_cursor);
     lv_obj_set_size(touch_cursor, TOUCH_CURSOR_SIZE, TOUCH_CURSOR_SIZE);
     lv_obj_set_style_radius(touch_cursor, LV_RADIUS_CIRCLE, LV_PART_MAIN);
     lv_obj_set_style_border_width(touch_cursor, 2, LV_PART_MAIN);
-    lv_obj_set_style_border_color(touch_cursor, lv_color_hex(T_PRIMARY), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(touch_cursor, lv_color_hex(T_PRIMARY), LV_PART_MAIN);
+    lv_obj_set_style_border_color(touch_cursor, lv_color_hex(T_ITEM_BORDER), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(touch_cursor, lv_color_hex(T_ITEM_BORDER), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(touch_cursor, LV_OPA_30, LV_PART_MAIN);
     lv_obj_clear_flag(touch_cursor, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(touch_cursor, LV_OBJ_FLAG_HIDDEN);
@@ -1368,7 +1350,7 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
     touch_label = lv_label_create(ui_root);
     lv_obj_set_size(touch_label, TOUCH_LABEL_W, TOUCH_LABEL_H);
     lv_label_set_long_mode(touch_label, LV_LABEL_LONG_CLIP);
-    lv_obj_set_style_text_color(touch_label, lv_color_hex(T_PRIMARY), LV_PART_MAIN);
+    lv_obj_set_style_text_color(touch_label, lv_color_hex(T_TEXT_DARK), LV_PART_MAIN);
     lv_obj_set_style_text_font(touch_label, &lv_font_montserrat_18, LV_PART_MAIN);
     lv_obj_clear_flag(touch_label, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(touch_label, LV_OBJ_FLAG_HIDDEN);
@@ -1378,11 +1360,10 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
     lv_obj_remove_style_all(s_toast);
     lv_obj_set_size(s_toast, 184, 56);
     lv_obj_align(s_toast, LV_ALIGN_CENTER, 0, -24);
-    lv_obj_set_style_bg_color(s_toast, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_toast, lv_color_black(), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(s_toast, LV_OPA_90, LV_PART_MAIN);
     lv_obj_set_style_radius(s_toast, 12, LV_PART_MAIN);
-    lv_obj_set_style_border_width(s_toast, 2, LV_PART_MAIN);
-    lv_obj_set_style_border_color(s_toast, lv_color_hex(T_PRIMARY), LV_PART_MAIN);
+    lv_obj_set_style_border_width(s_toast, 0, LV_PART_MAIN);
     lv_obj_add_flag(s_toast, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(s_toast, LV_OBJ_FLAG_HIDDEN);
 
@@ -1413,8 +1394,7 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
     s_viewer_title = lv_label_create(s_viewer_overlay);
     lv_obj_set_style_bg_color(s_viewer_title, lv_color_hex(GALLERY_CARD), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(s_viewer_title, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_border_width(s_viewer_title, 1, LV_PART_MAIN);
-    lv_obj_set_style_border_color(s_viewer_title, lv_color_hex(GALLERY_BORDER), LV_PART_MAIN);
+    lv_obj_set_style_border_width(s_viewer_title, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_hor(s_viewer_title, 8, LV_PART_MAIN);
     lv_obj_set_style_pad_ver(s_viewer_title, 2, LV_PART_MAIN);
     lv_obj_set_style_radius(s_viewer_title, LV_RADIUS_CIRCLE, LV_PART_MAIN);
@@ -1432,9 +1412,8 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
         lv_obj_set_style_bg_opa(vback, LV_OPA_COVER, LV_PART_MAIN);
         lv_obj_set_style_bg_color(vback, lv_color_hex(GALLERY_BORDER), LV_STATE_PRESSED);
         lv_obj_set_style_bg_opa(vback, LV_OPA_COVER, LV_STATE_PRESSED);
-        lv_obj_set_style_border_width(vback, 1, LV_PART_MAIN);
-        lv_obj_set_style_border_color(vback, lv_color_hex(GALLERY_BORDER), LV_PART_MAIN);
-        lv_obj_set_style_radius(vback, 7, LV_PART_MAIN);
+        lv_obj_set_style_border_width(vback, 0, LV_PART_MAIN);
+        lv_obj_set_style_radius(vback, 10, LV_PART_MAIN);
         lv_obj_add_flag(vback, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_event_cb(vback, viewer_back_cb, LV_EVENT_CLICKED, NULL);
         lv_obj_t *lb = lv_label_create(vback);
@@ -1449,7 +1428,7 @@ void lvgl_dispaly_ir_mlx90640(lv_disp_t *disp)
         lv_obj_align(vdel, LV_ALIGN_BOTTOM_RIGHT, -8, -8);
         lv_obj_set_style_bg_color(vdel, lv_color_hex(GALLERY_DANGER), LV_PART_MAIN);
         lv_obj_set_style_bg_opa(vdel, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_set_style_bg_color(vdel, lv_color_hex(0xA72B2B), LV_STATE_PRESSED);
+        lv_obj_set_style_bg_color(vdel, lv_color_hex(0x222222), LV_STATE_PRESSED);
         lv_obj_set_style_bg_opa(vdel, LV_OPA_COVER, LV_STATE_PRESSED);
         lv_obj_set_style_border_width(vdel, 0, LV_PART_MAIN);
         lv_obj_set_style_radius(vdel, 7, LV_PART_MAIN);
@@ -1569,7 +1548,7 @@ void thermal_ui_update_battery(int percentage, bool low_battery_warning)
     if (percentage < 0) percentage = 0;
     if (percentage > 100) percentage = 100;
 
-    uint32_t battery_color = (percentage < 20) ? T_DANGER : 0xF4F4FA;
+    uint32_t battery_color = (percentage < 20) ? T_DANGER : 0xF4F4F4;
     lv_color_t color = lv_color_hex(battery_color);
     lv_obj_set_style_border_color(s_battery_outline, color, LV_PART_MAIN);
     lv_obj_set_style_bg_color(s_battery_cap, color, LV_PART_MAIN);

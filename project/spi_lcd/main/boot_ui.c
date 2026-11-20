@@ -4,7 +4,7 @@
  *
  * 横屏版：逻辑分辨率 280x240（LVGL 软件旋转，见 app_main.c）。
  * 开机 Logo 按比例缩放居中显示在白色屏幕背景上。
- * 主题：蓝白风格（白底 + 主题蓝 #1976D2 + 深蓝文字 #123A66）。
+ * 主题：黑白灰风格。
  */
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -14,13 +14,13 @@
 
 extern const lv_img_dsc_t VIK;
 
-/* 蓝白主题色（与 lvgl_demo_ui.c 保持一致） */
-#define T_PRIMARY      0x1976D2
-#define T_PRIMARY_DEEP 0x0D47A1
-#define T_TEXT_DARK    0x123A66
-#define T_TEXT_MID     0x3A5B85
-#define T_ITEM_BG      0xEAF3FF
-#define T_ITEM_BORDER  0xBDD7F8
+/* Monochrome interface palette */
+#define T_PRIMARY      0x383838
+#define T_PRIMARY_DEEP 0x606060
+#define T_TEXT_DARK    0xFFFFFF
+#define T_TEXT_MID     0xB0B0B0
+#define T_ITEM_BG      0x242424
+#define T_ITEM_BORDER  0x303030
 
 void boot_show_splash(lv_disp_t *disp)
 {
@@ -37,8 +37,8 @@ void boot_show_splash(lv_disp_t *disp)
 
     example_lvgl_unlock();
 
-    /* 停留 5 秒，让 Logo 显示出来 */
-    vTaskDelay(pdMS_TO_TICKS(5000));
+    /* 停留 2 秒后进入下一画面 */
+    vTaskDelay(pdMS_TO_TICKS(2000));
 
     example_lvgl_lock(-1);
     lv_obj_del(img);
@@ -58,7 +58,7 @@ static void lang_pick_cb(lv_event_t *e)
     s_lang_picked = true;
 }
 
-/* 创建一个语言条目按钮（蓝白主题） */
+/* 创建一个语言条目按钮 */
 static lv_obj_t *create_lang_btn(lv_obj_t *parent, app_lang_t l)
 {
     lv_obj_t *btn = lv_obj_create(parent);
@@ -70,7 +70,7 @@ static lv_obj_t *create_lang_btn(lv_obj_t *parent, app_lang_t l)
     lv_obj_set_style_bg_color(btn, lv_color_hex(T_PRIMARY), LV_STATE_PRESSED);
     lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_STATE_PRESSED);
     lv_obj_set_style_text_color(btn, lv_color_white(), LV_STATE_PRESSED);
-    lv_obj_set_style_border_width(btn, 1, LV_PART_MAIN);
+    lv_obj_set_style_border_width(btn, 0, LV_PART_MAIN);
     lv_obj_set_style_border_color(btn, lv_color_hex(T_ITEM_BORDER), LV_PART_MAIN);
     lv_obj_set_style_border_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
@@ -93,13 +93,13 @@ void boot_show_language_select(lv_disp_t *disp)
     lv_obj_t *scr = lv_disp_get_scr_act(disp);
     lv_obj_clean(scr);
 
-    /* 白底 */
-    lv_obj_set_style_bg_color(scr, lv_color_white(), LV_PART_MAIN);
+    /* 深色背景，匹配主设置界面 */
+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x121212), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, LV_PART_MAIN);
 
     /* 标题（英文，作为中性提示） */
     lv_obj_t *title = lv_label_create(scr);
-    lv_obj_set_style_text_color(title, lv_color_hex(T_PRIMARY_DEEP), LV_PART_MAIN);
+    lv_obj_set_style_text_color(title, lv_color_hex(T_TEXT_DARK), LV_PART_MAIN);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_18, LV_PART_MAIN);
     lv_label_set_text(title, "Select Language");
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 20);
@@ -109,8 +109,10 @@ void boot_show_language_select(lv_disp_t *disp)
     lv_obj_remove_style_all(list);
     lv_obj_set_size(list, 244, 176);
     lv_obj_align(list, LV_ALIGN_TOP_MID, 0, 52);
-    lv_obj_set_style_bg_color(list, lv_color_hex(0xF4F8FE), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(list, lv_color_hex(0x121212), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(list, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(list, 0, LV_PART_MAIN);
+    lv_obj_set_style_border_color(list, lv_color_hex(T_ITEM_BORDER), LV_PART_MAIN);
     lv_obj_set_style_radius(list, 12, LV_PART_MAIN);
     lv_obj_set_style_pad_all(list, 8, LV_PART_MAIN);
     lv_obj_set_style_pad_row(list, 8, LV_PART_MAIN);
