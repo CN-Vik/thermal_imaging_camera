@@ -24,7 +24,7 @@
    这两个宏和 TAG 原本只写在 app_main.c 里，dev_sys.c 引用不到，这里补上。 */
 #define PIN_PWR_HOLD    GPIO_NUM_36  // 电源自锁输出
 #define PIN_KEY_DET     GPIO_NUM_37  // 按键检测输入
-#define POWER_KEY_ENABLE_DELAY_MS 5000
+#define POWER_KEY_ENABLE_DELAY_MS 3000
 #define POWER_KEY_HOLD_MS 2000
 #define POWER_KEY_POLL_MS   10
 #define POWER_KEY_TASK_PRIORITY 5

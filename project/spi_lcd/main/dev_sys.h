@@ -16,7 +16,7 @@
 extern "C" {
 #endif
 
-/* 开机上电：拉高 IO36 锁定电源；开机 5 秒后，IO37 持续按下 2 秒调用 sys_power_off */
+/* 开机上电：拉高 IO36 锁定电源；开机 3 秒后，IO37 持续按下 2 秒调用 sys_power_off */
 void power_on(void);
 
 /* 系统重启按钮回调（可直接绑定到 LVGL 按钮的 LV_EVENT_CLICKED） */

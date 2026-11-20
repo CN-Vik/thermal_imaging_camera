@@ -1,4 +1,5 @@
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "driver/gpio.h"
@@ -15,10 +16,10 @@
 
 #define BATTERY_ADC_GPIO              GPIO_NUM_4
 #define BATTERY_ADC_ATTENUATION       ADC_ATTEN_DB_12
-#define BATTERY_DIVIDER_HIGH_OHMS     55500.0f
-#define BATTERY_DIVIDER_LOW_OHMS      46200.0f
-#define BATTERY_MIN_VOLTAGE           3.5f
-#define BATTERY_MAX_VOLTAGE           4.2f
+#define BATTERY_DIVIDER_HIGH_OHMS     56000.0f
+#define BATTERY_DIVIDER_LOW_OHMS      150000.0f
+#define BATTERY_MIN_VOLTAGE           3.30f
+#define BATTERY_MAX_VOLTAGE           4.20f
 #define BATTERY_ADC_SAMPLE_COUNT      16
 #define BATTERY_SAMPLE_PERIOD_MS      1000
 #define BATTERY_LOW_SHUTDOWN_DELAY_S  5
@@ -121,14 +122,48 @@ static esp_err_t battery_read_voltage(float *voltage, int *adc_pin_mv, int *aver
 
 static int battery_voltage_to_percentage(float voltage)
 {
+    static const struct {
+        float voltage;
+        int percentage;
+    } discharge_curve[] = {
+        {3.30f, 0},
+        {3.45f, 5},
+        {3.55f, 10},
+        {3.60f, 15},
+        {3.65f, 20},
+        {3.70f, 30},
+        {3.75f, 40},
+        {3.80f, 50},
+        {3.85f, 60},
+        {3.90f, 70},
+        {3.95f, 80},
+        {4.00f, 88},
+        {4.10f, 95},
+        {4.20f, 100},
+    };
+    const size_t point_count = sizeof(discharge_curve) / sizeof(discharge_curve[0]);
+
     if (voltage <= BATTERY_MIN_VOLTAGE) {
         return 0;
     }
     if (voltage >= BATTERY_MAX_VOLTAGE) {
         return 100;
     }
-    return (int)((voltage - BATTERY_MIN_VOLTAGE) * 100.0f /
-                 (BATTERY_MAX_VOLTAGE - BATTERY_MIN_VOLTAGE));
+
+    for (size_t i = 1; i < point_count; i++) {
+        if (voltage <= discharge_curve[i].voltage) {
+            const float segment =
+                (voltage - discharge_curve[i - 1].voltage) /
+                (discharge_curve[i].voltage - discharge_curve[i - 1].voltage);
+            const float percentage =
+                (float)discharge_curve[i - 1].percentage +
+                segment * (float)(discharge_curve[i].percentage -
+                                  discharge_curve[i - 1].percentage);
+            return (int)(percentage + 0.5f);
+        }
+    }
+
+    return 100;
 }
 
 static void battery_monitor_task(void *arg)
@@ -164,6 +199,11 @@ static void battery_monitor_task(void *arg)
             shutdown_countdown = BATTERY_LOW_SHUTDOWN_DELAY_S;
             ESP_LOGW(TAG, "Battery low: %.3fV (%d%%), powering off in %d seconds",
                      (double)voltage, percentage, shutdown_countdown);
+        } else if (percentage >= 8 && shutdown_pending) {
+            shutdown_pending = false;
+            shutdown_countdown = 0;
+            ESP_LOGI(TAG, "Battery voltage recovered: %.3fV (%d%%)",
+                     (double)voltage, percentage);
         }
 
         thermal_ui_update_battery(percentage, shutdown_pending);
