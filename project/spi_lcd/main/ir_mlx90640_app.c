@@ -109,13 +109,14 @@ ir_app_settings_t g_ir_settings = {
 /*
  * 时域降噪参数（针对 16Hz 下 MLX90640 底噪优化）：
  */
-#define TEMP_FILTER_ALPHA_MIN           0.12f
-#define TEMP_FILTER_ALPHA_MAX           0.85f
-#define TEMP_FILTER_NOISE_FLOOR_C       0.75f
-#define TEMP_FILTER_MOTION_SAT_C        2.20f
+#define TEMP_FILTER_ALPHA_MIN           0.08f
+#define TEMP_FILTER_ALPHA_MAX           0.88f
+#define TEMP_FILTER_NOISE_FLOOR_C       0.85f
+#define TEMP_FILTER_MOTION_SAT_C        2.40f
+#define TEMP_FILTER_SPIKE_GUARD_C        2.10f
 
-/* 3x3 孤立噪点抑制阈值：平坦背景区使用 0.58℃，手指边缘区自动切换为二阶连通保护 */
-#define THERMAL_OUTLIER_THRESH_C        0.58f
+/* 3x3 孤立噪点抑制阈值：平坦背景区收紧，结构边缘继续保护连通性。 */
+#define THERMAL_OUTLIER_THRESH_C        0.30f
 
 /* 较宽的自动量程与按温差增加的余量，避免大面积热区挤进色表顶端。 */
 #define AUTO_RANGE_MIN_SPAN_C           8.0f
@@ -243,7 +244,7 @@ static void update_temporal_and_deinterlace(const float *raw_src, float *filt_st
 {
     const float inv_motion_span = 1.0f / (TEMP_FILTER_MOTION_SAT_C - TEMP_FILTER_NOISE_FLOOR_C);
 
-    // 阶段 A：仅更新当前 subpage 新采样的 384 个真实像素
+    // 阶段 A：更新当前子场，并用异场邻域验证中等幅度的孤立跳变。
     for (int r = 0; r < h; r++) {
         int first_c = ((r & 1) == subpage) ? 0 : 1;
         for (int c = first_c; c < w; c += 2) {
@@ -267,14 +268,41 @@ static void update_temporal_and_deinterlace(const float *raw_src, float *filt_st
                 alpha = TEMP_FILTER_ALPHA_MAX;
             } else {
                 float t = (d - TEMP_FILTER_NOISE_FLOOR_C) * inv_motion_span;
+                t = t * t * (3.0f - 2.0f * t);
                 alpha = TEMP_FILTER_ALPHA_MIN + t * (TEMP_FILTER_ALPHA_MAX - TEMP_FILTER_ALPHA_MIN);
+            }
+
+            if (d > TEMP_FILTER_NOISE_FLOOR_C && d < TEMP_FILTER_SPIKE_GUARD_C) {
+                float neighbor_min = IR_TEMP_MAX_VALID_C;
+                float neighbor_max = IR_TEMP_MIN_VALID_C;
+                int neighbor_count = 0;
+                const int dr[4] = {-1, 1, 0, 0};
+                const int dc[4] = {0, 0, -1, 1};
+                for (int k = 0; k < 4; k++) {
+                    int rr = r + dr[k];
+                    int cc = c + dc[k];
+                    if (rr < 0 || rr >= h || cc < 0 || cc >= w) continue;
+
+                    float neighbor = filt_state[rr * w + cc];
+                    if (!ir_temperature_is_valid(neighbor)) continue;
+                    if (neighbor < neighbor_min) neighbor_min = neighbor;
+                    if (neighbor > neighbor_max) neighbor_max = neighbor;
+                    neighbor_count++;
+                }
+
+                if (neighbor_count >= 2 &&
+                    (raw_v < neighbor_min - 0.55f ||
+                     raw_v > neighbor_max + 0.55f)) {
+                    alpha = TEMP_FILTER_ALPHA_MIN +
+                            0.25f * (alpha - TEMP_FILTER_ALPHA_MIN);
+                }
             }
 
             filt_state[idx] = prev_v + alpha * (raw_v - prev_v);
         }
     }
 
-    // 阶段 B：检查上一场的 384 个旧像素是否因热源运动而滞后
+    // 阶段 B：检查上一子场的旧像素，并在平坦区消除奇偶场微差。
     for (int r = 0; r < h; r++) {
         int r_prev = (r > 0) ? (r - 1) : r;
         int r_next = (r < h - 1) ? (r + 1) : r;
@@ -293,7 +321,11 @@ static void update_temporal_and_deinterlace(const float *raw_src, float *filt_st
             float n2 = filt_state[r * w + c_prev];
             float n3 = filt_state[r * w + c_next];
 
-            if (!ir_temperature_is_valid(val)) continue;
+            if (!ir_temperature_is_valid(val) ||
+                !ir_temperature_is_valid(n0) || !ir_temperature_is_valid(n1) ||
+                !ir_temperature_is_valid(n2) || !ir_temperature_is_valid(n3)) {
+                continue;
+            }
 
             // 快速排序网络: n0 <= n1 <= n2 <= n3
             if (n0 > n1) { float t = n0; n0 = n1; n1 = t; }
@@ -305,12 +337,9 @@ static void update_temporal_and_deinterlace(const float *raw_src, float *filt_st
             float ortho_med = 0.5f * (n1 + n2);
             float ortho_span = n3 - n0;
 
-            // 关键区分：
-            // - 若正交 4 邻居存在明显温差（ortho_span >= 0.90℃，如指根夹角或手指边缘），
-            //   使用外部极值 [n0, n3] 作为越界基准，只要有 1 个方向连着低温指缝 (n0)，就绝不把指缝拉成高温！
-            // - 若正交 4 邻居平坦（ortho_span < 0.90℃，如背景区），使用内部区间 [n1, n2] 消除奇偶噪点。
-            float lo_ref = (ortho_span >= 0.90f) ? n0 : n1;
-            float hi_ref = (ortho_span >= 0.90f) ? n3 : n2;
+            bool is_edge = (ortho_span >= 0.90f);
+            float lo_ref = is_edge ? n0 : n1;
+            float hi_ref = is_edge ? n3 : n2;
 
             float out_of_bounds = 0.0f;
             if (val < lo_ref) {
@@ -319,20 +348,24 @@ static void update_temporal_and_deinterlace(const float *raw_src, float *filt_st
                 out_of_bounds = val - hi_ref;
             }
 
-            if (out_of_bounds > 0.50f) {
-                float m_weight = clampf_local((out_of_bounds - 0.50f) * 0.65f, 0.25f, 0.90f);
+            float trigger = is_edge ? 0.45f : 0.35f;
+            if (out_of_bounds > trigger) {
+                float m_weight = clampf_local((out_of_bounds - trigger) * 0.72f,
+                                              0.25f, 0.90f);
                 filt_state[idx] = val + m_weight * (ortho_med - val);
+            } else if (!is_edge) {
+                filt_state[idx] = val + 0.22f * (ortho_med - val);
             }
         }
     }
 }
 
 /*
- * 2. 3x3 鲁棒中值异常点抑制（带指缝/指尖连通性保护）
- *    - 在平坦区（v[n-2] - v[1] < 1.5℃）：与中位数 v[n/2] 比较，积极滤除背景噪点
+ * 2. 3x3 鲁棒异常点抑制（带指缝/指尖连通性保护）
+ *    - 在平坦区（v[n-2] - v[1] < 1.5℃）：与中间三个样本的均值比较，积极滤除背景噪点
  *    - 在手指/指缝结构区（v[n-2] - v[1] >= 1.5℃）：1 像素宽的指缝在 3x3 窗口内只有 2~3 个低温点，
- *      中位数 v[4] 必然是两侧的高温手指！此时改为与 [v[1], v[n-2]] 比较，
- *      确保只要指缝或指尖有至少 2 个像素相连，就绝不会被中值滤波填平或削断。
+ *      中间样本可能来自两侧的高温手指，因此边缘区改为与 [v[1], v[n-2]] 比较，
+ *      尽量避免把连通的低温指缝填平或削断。
  */
 static void spatial_median_outlier_filter(const float *src, float *dst, int w, int h)
 {
@@ -376,29 +409,29 @@ static void spatial_median_outlier_filter(const float *src, float *dst, int w, i
                 v[j + 1] = key;
             }
 
-            float median = v[n / 2];
+            int mid = n / 2;
+            float mid_avg = (v[mid - 1] + v[mid] + v[mid + 1]) * (1.0f / 3.0f);
             float second_low  = v[1];
             float second_high = v[n - 2];
             float struct_span = second_high - second_low;
 
             if (struct_span < 1.50f) {
-                // 平坦背景或手心内部：使用中位数强力滤除孤立噪点
-                float diff = fabsf(center - median);
+                // 平坦背景或手心内部：以中位附近三个样本的均值压制孤立噪点。
+                float diff = fabsf(center - mid_avg);
                 if (diff > THERMAL_OUTLIER_THRESH_C) {
                     float strength = clampf_local(
-                        (diff - THERMAL_OUTLIER_THRESH_C) / 1.1f,
-                        0.15f, 0.78f);
-                    dst[idx] = center + strength * (median - center);
+                        (diff - THERMAL_OUTLIER_THRESH_C) / 0.85f,
+                        0.25f, 0.90f);
+                    dst[idx] = center + strength * (mid_avg - center);
                 } else {
                     dst[idx] = center;
                 }
             } else {
-                // 手指边缘、指尖或指缝区：仅当像素孤立超出次高/次低范围 [v[1], v[n-2]] 时才修正，
-                // 彻底杜绝 3x3 中位数把低温指缝拉向高温手指造成“趾蹼”！
-                if (center > second_high + 0.80f) {
-                    dst[idx] = second_high + 0.35f * (center - second_high);
-                } else if (center < second_low - 0.80f) {
-                    dst[idx] = second_low - 0.35f * (second_low - center);
+                // 结构边缘仅削弱孤立毛刺，保留连通的手指与指缝。
+                if (center > second_high + 0.60f) {
+                    dst[idx] = second_high + 0.30f * (center - second_high);
+                } else if (center < second_low - 0.60f) {
+                    dst[idx] = second_low - 0.30f * (second_low - center);
                 } else {
                     dst[idx] = center;
                 }
@@ -473,111 +506,112 @@ static float min_valid_temperature(const float *values)
     return min_temp;
 }
 
-/*
- * 3. 防指缝漏热的 3x3 双边保边平滑滤波
- *    - 平坦区消除固定图案噪声 (FPN) 与奇偶微差
- *    - 非对称防漏热保护：当邻居比中心像素更热（例如两侧手指高于中间指缝）时，
- *      将截断阈值收紧至 0.65℃，严防两侧高温手指向中间低温指缝扩散热量导致手指粘连
- */
-static void spatial_bilateral_denoise(const float *src, float *dst, int w, int h)
+/* 3x3 双边滤波：自适应中心权重、平坦区奇偶均衡和冷热边缘非对称保护。 */
+static void spatial_bilateral_pass(const float *src, float *dst, int w, int h,
+                                   bool equalize_subpage, float thresh_flat)
 {
-    const float edge_thresh_flat = 0.75f;
-    const float edge_thresh_hot_bleed = 0.65f; // 阻止高温邻居把低温指缝拉高
+    const float thresh_hot_bleed = 0.60f;
+    const float thresh_cold_edge = 0.85f;
 
     for (int r = 0; r < h; r++) {
-        int r_prev = (r > 0) ? (r - 1) : r;
-        int r_next = (r < h - 1) ? (r + 1) : r;
-
+        int r_prev = (r > 0) ? r - 1 : r;
+        int r_next = (r < h - 1) ? r + 1 : r;
         for (int c = 0; c < w; c++) {
-            int c_prev = (c > 0) ? (c - 1) : c;
-            int c_next = (c < w - 1) ? (c + 1) : c;
-
+            int c_prev = (c > 0) ? c - 1 : c;
+            int c_next = (c < w - 1) ? c + 1 : c;
             float center = src[r * w + c];
             if (!ir_temperature_is_valid(center)) {
                 dst[r * w + c] = center;
                 continue;
             }
 
-            // 正交 4 邻域
             float ortho[4] = {
-                src[r_prev * w + c],
-                src[r_next * w + c],
-                src[r * w + c_prev],
-                src[r * w + c_next]
+                src[r_prev * w + c], src[r_next * w + c],
+                src[r * w + c_prev], src[r * w + c_next]
             };
-
-            // 对角 4 邻域
             float diag[4] = {
-                src[r_prev * w + c_prev],
-                src[r_prev * w + c_next],
-                src[r_next * w + c_prev],
-                src[r_next * w + c_next]
+                src[r_prev * w + c_prev], src[r_prev * w + c_next],
+                src[r_next * w + c_prev], src[r_next * w + c_next]
             };
 
-            // 计算正交邻域极差，判断当前是否处于平坦区
-            float o_min = center, o_max = center;
+            float ortho_min = center;
+            float ortho_max = center;
+            float ortho_sum = 0.0f;
+            int ortho_count = 0;
             for (int i = 0; i < 4; i++) {
                 if (!ir_temperature_is_valid(ortho[i])) continue;
-                if (ortho[i] < o_min) o_min = ortho[i];
-                if (ortho[i] > o_max) o_max = ortho[i];
+                if (ortho[i] < ortho_min) ortho_min = ortho[i];
+                if (ortho[i] > ortho_max) ortho_max = ortho[i];
+                ortho_sum += ortho[i];
+                ortho_count++;
             }
-            float ortho_span = o_max - o_min;
+            float ortho_span = ortho_max - ortho_min;
 
-            // 仅在非边缘/非指缝的平坦区域（ortho_span < 1.0℃）消除中心点与正交邻域的静态奇偶微差
-            if (ortho_span < 1.0f) {
-                float ortho_sum = 0.0f;
-                int ortho_count = 0;
-                for (int i = 0; i < 4; i++) {
-                    if (ir_temperature_is_valid(ortho[i])) {
-                        ortho_sum += ortho[i];
-                        ortho_count++;
-                    }
-                }
-                float ortho_avg = ortho_count > 0
-                                ? ortho_sum / (float)ortho_count : center;
-                if (ortho_count > 0 && fabsf(center - ortho_avg) < 0.80f) {
-                    center = 0.65f * center + 0.35f * ortho_avg;
+            if (equalize_subpage && ortho_count > 0 && ortho_span < 1.20f) {
+                float ortho_avg = ortho_sum / (float)ortho_count;
+                if (fabsf(center - ortho_avg) < 0.85f) {
+                    float eq_weight = 0.45f * (1.0f - ortho_span / 1.20f);
+                    center += eq_weight * (ortho_avg - center);
                 }
             }
 
-            float sum_smooth = center * 9.0f;
-            float w_total = 9.0f;
+            float edge_factor =
+                clampf_local((ortho_span - 0.60f) / 1.40f, 0.0f, 1.0f);
+            float center_weight = 1.6f + 2.4f * edge_factor;
+            float sum = center * center_weight;
+            float weight_sum = center_weight;
+            bool is_gradient = ortho_span >= 0.90f;
 
             for (int i = 0; i < 4; i++) {
                 if (ir_temperature_is_valid(ortho[i])) {
-                    // 正交邻居：如果邻居比中心点热且处于有梯度的区域（如手指高于指缝），使用 0.65℃ 严苛阈值阻断漏热
-                    float diff_o = ortho[i] - center;
-                    float d_o = fabsf(diff_o);
-                    float thresh_o = (diff_o > 0.0f && ortho_span >= 0.90f)
-                                     ? edge_thresh_hot_bleed
-                                     : edge_thresh_flat;
-                    if (d_o < thresh_o) {
-                        float t = 1.0f - (d_o / thresh_o);
-                        float w_o = 1.0f * t * t;
-                        sum_smooth += ortho[i] * w_o;
-                        w_total += w_o;
+                    float difference = ortho[i] - center;
+                    float threshold = thresh_flat;
+                    if (is_gradient) {
+                        threshold = (difference > 0.0f)
+                                  ? thresh_hot_bleed : thresh_cold_edge;
+                    }
+                    float distance = fabsf(difference);
+                    if (distance < threshold) {
+                        float t = 1.0f - distance / threshold;
+                        float weight = t * t;
+                        sum += ortho[i] * weight;
+                        weight_sum += weight;
                     }
                 }
 
-                // 对角邻居：同样阻止高温对角像素向低温指缝漏热
                 if (ir_temperature_is_valid(diag[i])) {
-                    float diff_d = diag[i] - center;
-                    float d_d = fabsf(diff_d);
-                    float thresh_d = (diff_d > 0.0f && ortho_span >= 0.90f)
-                                     ? edge_thresh_hot_bleed
-                                     : edge_thresh_flat;
-                    if (d_d < thresh_d) {
-                        float t = 1.0f - (d_d / thresh_d);
-                        float w_d = 0.25f * t * t;
-                        sum_smooth += diag[i] * w_d;
-                        w_total += w_d;
+                    float difference = diag[i] - center;
+                    float threshold = thresh_flat;
+                    if (is_gradient) {
+                        threshold = (difference > 0.0f)
+                                  ? thresh_hot_bleed : thresh_cold_edge;
+                    }
+                    float distance = fabsf(difference);
+                    if (distance < threshold) {
+                        float t = 1.0f - distance / threshold;
+                        float weight = 0.50f * t * t;
+                        sum += diag[i] * weight;
+                        weight_sum += weight;
                     }
                 }
             }
 
-            dst[r * w + c] = sum_smooth / w_total;
+            dst[r * w + c] = sum / weight_sum;
         }
     }
+}
+
+static void spatial_bilateral_denoise(const float *src, float *dst,
+                                      int w, int h, int passes)
+{
+    if (passes <= 1) {
+        spatial_bilateral_pass(src, dst, w, h, true, 1.15f);
+        return;
+    }
+
+    static float bilateral_tmp[MLX_RAW_PIXELS];
+    spatial_bilateral_pass(src, bilateral_tmp, w, h, true, 1.15f);
+    spatial_bilateral_pass(bilateral_tmp, dst, w, h, false, 0.95f);
 }
 
 static void spatial_gaussian_denoise(const float *src, float *dst, int w, int h)
@@ -640,10 +674,11 @@ static void apply_spatial_filter(const float *filtered, const float *median,
         spatial_gaussian_denoise(median, dst, MLX_RAW_W, MLX_RAW_H);
         break;
     case IR_FILTER_BILATERAL:
+        spatial_bilateral_denoise(median, dst, MLX_RAW_W, MLX_RAW_H, 1);
+        break;
     case IR_FILTER_BSPLINE:
     default:
-        /* 始终基于 3x3 鲁棒中值滤波后的 median 进行双边保边滤波，与原版流水线完全一致 */
-        spatial_bilateral_denoise(median, dst, MLX_RAW_W, MLX_RAW_H);
+        spatial_bilateral_denoise(median, dst, MLX_RAW_W, MLX_RAW_H, 2);
         break;
     }
 }
@@ -998,6 +1033,33 @@ static inline void catmull_rom_weights_q12(float t, int16_t weights[4])
     weights[3] = (int16_t)w3;
 }
 
+static inline void bspline_weights_q12(float t, int16_t weights[4])
+{
+    const float inv_six = 4096.0f / 6.0f;
+    const float it = 1.0f - t;
+    const float t2 = t * t;
+    const float t3 = t2 * t;
+    const int w0 = (int)lrintf(it * it * it * inv_six);
+    const int w2 = (int)lrintf((-3.0f * t3 + 3.0f * t2 + 3.0f * t + 1.0f) *
+                               inv_six);
+    const int w3 = (int)lrintf(t3 * inv_six);
+
+    weights[0] = (int16_t)w0;
+    weights[1] = (int16_t)(4096 - w0 - w2 - w3);
+    weights[2] = (int16_t)w2;
+    weights[3] = (int16_t)w3;
+}
+
+static inline void interp_weights_q12(float t, bool use_bspline,
+                                      int16_t weights[4])
+{
+    if (use_bspline) {
+        bspline_weights_q12(t, weights);
+    } else {
+        catmull_rom_weights_q12(t, weights);
+    }
+}
+
 static inline int32_t round_shift_signed(int32_t value, unsigned int shift)
 {
     const int32_t half = 1 << (shift - 1);
@@ -1034,6 +1096,7 @@ static void catmull_rom_scale_fullscreen_1to1(const uint16_t *src, int src_w, in
     const bool flip_y = (rot == IR_ROT_180 || rot == IR_ROT_270)
                         ? !g_ir_settings.mirror_vertical
                         : g_ir_settings.mirror_vertical;
+    const bool use_bspline = (g_ir_settings.filter_mode == IR_FILTER_BSPLINE);
 
     const uint16_t *input = src;
     int input_w = src_w;
@@ -1062,7 +1125,7 @@ static void catmull_rom_scale_fullscreen_1to1(const uint16_t *src, int src_w, in
         if (pos > max_x_fp) pos = max_x_fp;
         int base = (int)(pos >> 16);
         float frac = (float)(pos & 0xFFFFU) * (1.0f / 65536.0f);
-        catmull_rom_weights_q12(frac, x_weights[x]);
+        interp_weights_q12(frac, use_bspline, x_weights[x]);
         for (int k = 0; k < 4; k++) {
             x_idx[x][k] = (uint8_t)clamp_int_local(base - 1 + k, 0, input_w - 1);
         }
@@ -1089,7 +1152,7 @@ static void catmull_rom_scale_fullscreen_1to1(const uint16_t *src, int src_w, in
         int base = (int)(pos >> 16);
         float frac = (float)(pos & 0xFFFFU) * (1.0f / 65536.0f);
         int16_t y_weights[4];
-        catmull_rom_weights_q12(frac, y_weights);
+        interp_weights_q12(frac, use_bspline, y_weights);
 
         const uint16_t *rows[4];
         for (int k = 0; k < 4; k++) {
