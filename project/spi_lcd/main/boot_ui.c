@@ -3,7 +3,7 @@
  * @brief 开机画面 + 首次开机语言选择（阻塞式）
  *
  * 横屏版：逻辑分辨率 280x240（LVGL 软件旋转，见 app_main.c）。
- * 开机 Logo 保留原图黑底，按原始比例居中显示在白色屏幕背景上。
+ * 开机 Logo 按比例缩放居中显示在白色屏幕背景上。
  * 主题：蓝白风格（白底 + 主题蓝 #1976D2 + 深蓝文字 #123A66）。
  */
 #include "freertos/FreeRTOS.h"
@@ -12,7 +12,7 @@
 #include "lang.h"
 #include "ir_mlx90640_app.h"
 
-extern const lv_img_dsc_t power_on_start_img;
+extern const lv_img_dsc_t VIK;
 
 /* 蓝白主题色（与 lvgl_demo_ui.c 保持一致） */
 #define T_PRIMARY      0x1976D2
@@ -31,14 +31,14 @@ void boot_show_splash(lv_disp_t *disp)
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, LV_PART_MAIN);
 
     lv_obj_t *img = lv_img_create(scr);
-    lv_img_set_src(img, &power_on_start_img);
+    lv_img_set_src(img, &VIK);
     lv_obj_center(img);
     lv_obj_clear_flag(img, LV_OBJ_FLAG_CLICKABLE);
 
     example_lvgl_unlock();
 
-    /* 停留约 1.5 秒，让 Logo 显示出来 */
-    vTaskDelay(pdMS_TO_TICKS(1500));
+    /* 停留 5 秒，让 Logo 显示出来 */
+    vTaskDelay(pdMS_TO_TICKS(5000));
 
     example_lvgl_lock(-1);
     lv_obj_del(img);
