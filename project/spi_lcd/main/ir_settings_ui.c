@@ -303,6 +303,14 @@ static void settings_power_off_event_cb(lv_event_t *event)
     sys_power_off();
 }
 
+static void gallery_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) return;
+    if (menu_click_guard()) return;
+    ir_settings_ui_close();
+    thermal_ui_show_gallery();
+}
+
 static bool is_category_page(settings_page_t page)
 {
     return page == PAGE_BASIC || page == PAGE_ADVANCED || page == PAGE_OTHER;
@@ -484,6 +492,9 @@ static void render_main_page(void)
     s_sleep_value = NULL;
     update_header(PAGE_MAIN);
     lv_obj_clean(s_body);
+    lv_obj_add_flag(s_body, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(s_body, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(s_body, LV_SCROLLBAR_MODE_ON);
 
     create_menu_card(lang_str(STR_BASIC_SETTINGS), LV_SYMBOL_SETTINGS,
                      12, 10, menu_item_event_cb,
@@ -491,8 +502,10 @@ static void render_main_page(void)
     create_menu_card(lang_str(STR_ADVANCED_SETTINGS), LV_SYMBOL_LIST,
                      12, 73, menu_item_event_cb,
                      (void *)(uintptr_t)PAGE_ADVANCED);
+    create_menu_card(lang_str(STR_GALLERY), LV_SYMBOL_IMAGE,
+                     12, 136, gallery_event_cb, NULL);
     create_menu_card(lang_str(STR_OTHER), LV_SYMBOL_POWER,
-                     12, 136, menu_item_event_cb,
+                     12, 199, menu_item_event_cb,
                      (void *)(uintptr_t)PAGE_OTHER);
 }
 
@@ -501,6 +514,9 @@ static void render_category_page(settings_page_t page)
     s_current_page = page;
     update_header(page);
     lv_obj_clean(s_body);
+    lv_obj_clear_flag(s_body, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(s_body, LV_DIR_NONE);
+    lv_obj_set_scrollbar_mode(s_body, LV_SCROLLBAR_MODE_OFF);
     lv_obj_t *list = create_category_list();
 
     if (page == PAGE_BASIC) {

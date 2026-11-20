@@ -22,6 +22,7 @@
 #include "dev_sys.h"
 #include "lang.h"
 #include "boot_ui.h"
+#include "photo.h"
 #include "ir_settings_ui.h"
 #include "battery_monitor.h"
 #include "esp_lcd_touch_cst816s.h"
@@ -456,6 +457,11 @@ void app_main(void)
 
     /* ============ 开机 Logo + 首次开机语言选择 ============ */
     lang_init();
+    esp_err_t photo_err = photo_init();
+    if (photo_err != ESP_OK) {
+        ESP_LOGE(TAG, "Photo storage initialization failed: %s",
+                 esp_err_to_name(photo_err));
+    }
     boot_show_splash(disp);
     if (!lang_configured()) {
         boot_show_language_select(disp);
